@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>存储浏览 · storage-bridge</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">storage-bridge</div>
+    <div class="topbar-note">远端资源浏览器</div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="picker">
+        <label for="storage-select">资源库</label>
+        <select id="storage-select" disabled>
+          <option value="">加载中…</option>
+        </select>
+        <div class="storage-meta" id="storage-meta"></div>
+      </div>
+
+      <div class="tree-head">
+        <span>文件树</span>
+        <button id="refresh-button" class="text-button" type="button" title="重新加载资源库和当前树">
+          刷新
+        </button>
+      </div>
+
+      <div class="tree" id="tree" role="tree" aria-label="文件树"></div>
+    </aside>
+
+    <main class="content">
+      <div class="empty" id="empty-state">
+        <h1>存储浏览</h1>
+        <p>在左侧选择一个资源库，然后展开目录查看文件。</p>
+      </div>
+
+      <section class="details" id="details" hidden>
+        <h2 id="details-name"></h2>
+        <dl>
+          <dt>类型</dt>
+          <dd id="details-type"></dd>
+          <dt>路径</dt>
+          <dd id="details-path"></dd>
+          <dt>大小</dt>
+          <dd id="details-size"></dd>
+          <dt>修改时间</dt>
+          <dd id="details-mtime"></dd>
+        </dl>
+      </section>
+    </main>
+  </div>
+
+  <div class="selection-bar" id="selection-bar" hidden>
+    <div class="selection-info">
+      <div class="selection-count" id="selection-count"></div>
+      <div class="selection-hint" id="selection-hint"></div>
+      <div class="selection-result" id="selection-result" hidden></div>
+    </div>
+    <label class="mode-picker" title="校验模式：同名同上级目录且大小相同的已扫过就跳过；完整扫描：全部重新算哈希">
+      <span class="mode-label">模式</span>
+      <select id="scan-mode">
+        <option value="verify">校验模式</option>
+        <option value="full">完整扫描</option>
+      </select>
+    </label>
+    <button id="scan-button" class="primary-button" type="button">扫描</button>
+    <button id="selection-clear" class="text-button" type="button">清除</button>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

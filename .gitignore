@@ -1,0 +1,7 @@
+opencode.json
+.cache
+build
+config
+document
+scripts
+.clang-format
