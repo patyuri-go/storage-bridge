@@ -2,7 +2,10 @@
 
 #include "hasher.hpp"
 #include "job_worker.hpp"
+#include "pg_store.hpp"
 #include "util.hpp"
+
+#include <trantor/utils/Logger.h>
 
 #include <chrono>
 #include <cstdint>
@@ -78,15 +81,18 @@ std::string ScanFileJob::label() const {
   return cat("scan-file ", redact_uri(ref_.uri));
 }
 
-Status ScanFileJob::run(JobWorker&) {
+Status ScanFileJob::run(JobWorker& worker) {
   if (!ctx_ || !ctx_->storage) {
     return err(ErrorCode::Internal, "扫描任务缺少 storage", "", label());
   }
-  if (ctx_->pg == nullptr) {
-    return err(ErrorCode::Internal, "扫描任务缺少 PgStore", "", label());
+  if (ctx_->db == nullptr) {
+    return err(ErrorCode::Internal, "扫描任务缺少 DbPool", "", label());
   }
   if (key_.empty()) {
     return err(ErrorCode::Internal, "扫描任务缺少 key", "", label());
+  }
+  if (worker.cancelled()) {
+    return {};
   }
 
   // 校验模式：先按「上级目录/文件名」查已有位置，大小一致就直接认定已扫描。
@@ -102,14 +108,15 @@ Status ScanFileJob::run(JobWorker&) {
     }
     const std::string probe = two_level_key(key_);
     if (!probe.empty() && size > 0) {
-      auto matched =
-          ctx_->pg->location_matches_size(ctx_->storage_id, probe, static_cast<long long>(size));
+      auto matched = ctx_->db->submit([this, &probe, size](PgStore& db) {
+        return db.location_matches_size(ctx_->storage_id, probe, static_cast<long long>(size));
+      }).get();
       if (!matched) {
         return matched.error();
       }
       if (*matched) {
-        log(LogLevel::Debug, cat("job scan-file verify 命中，跳过: ", probe,
-                                 " size=", std::to_string(size), " (", redact_uri(ref_.uri), ")"));
+        LOG_DEBUG << cat("job scan-file verify 命中，跳过: ", probe, " size=", std::to_string(size),
+                         " (", redact_uri(ref_.uri), ")");
         return {};
       }
     }
@@ -133,6 +140,9 @@ Status ScanFileJob::run(JobWorker&) {
     if (*got == 0) {
       break;
     }
+    if (worker.cancelled()) {
+      return {}; // 关闭中：丢弃这一轮，不写库
+    }
     if (Status st = hasher.update(buf.data(), *got); !st) {
       return st;
     }
@@ -145,15 +155,21 @@ Status ScanFileJob::run(JobWorker&) {
     return hex.error();
   }
 
-  auto outcome = ctx_->pg->record_file(ctx_->storage_id, key_, *hex, static_cast<long long>(total),
-                                       mime_type_for(key_));
-  if (!outcome) {
-    log(LogLevel::Warn, cat("job scan-file 添加失败: ", key_, " -> ", outcome.error().to_string()));
+  if (worker.cancelled()) {
+    return {};
   }
 
-  log(LogLevel::Debug,
-      cat("job scan-file ", redact_uri(ref_.uri), " sha256=", *hex, " size=", std::to_string(total),
-          " -> ", to_string(outcome ? outcome->action : LocationAction::Skipped)));
+  auto outcome = ctx_->db->submit([this, &hex, total](PgStore& db) {
+    return db.record_file(ctx_->storage_id, key_, *hex, static_cast<long long>(total),
+                          mime_type_for(key_));
+  }).get();
+  if (!outcome) {
+    LOG_WARN << cat("job scan-file 添加失败: ", key_, " -> ", outcome.error().to_string());
+  }
+
+  LOG_DEBUG << cat("job scan-file ", redact_uri(ref_.uri), " sha256=", *hex,
+                   " size=", std::to_string(total), " -> ",
+                   to_string(outcome ? outcome->action : LocationAction::Skipped));
   return {};
 }
 
@@ -173,6 +189,9 @@ Status ScanFolderJob::run(JobWorker& worker) {
   if (!ctx_ || !ctx_->storage) {
     return err(ErrorCode::Internal, "扫描任务缺少 storage", "", label());
   }
+  if (worker.cancelled()) {
+    return {};
+  }
 
   // 第一步：只列一次目录，结果留在 pending_
   if (!listed_) {
@@ -189,13 +208,17 @@ Status ScanFolderJob::run(JobWorker& worker) {
     }
     listed_ = true;
     if (pending_.empty()) {
-      log(LogLevel::Debug, cat("job scan-folder ", redact_uri(uri_), " -> 0 files, 0 dirs"));
+      LOG_DEBUG << cat("job scan-folder ", redact_uri(uri_), " -> 0 files, 0 dirs");
     }
   }
 
+  if (worker.cancelled()) {
+    return {};
+  }
+
   if (cursor_ >= pending_.size()) {
-    log(LogLevel::Debug, cat("job scan-folder ", redact_uri(uri_), " -> ", std::to_string(files_),
-                             " files, ", std::to_string(dirs_), " dirs"));
+    LOG_DEBUG << cat("job scan-folder ", redact_uri(uri_), " -> ", std::to_string(files_),
+                     " files, ", std::to_string(dirs_), " dirs");
     return {};
   }
 
@@ -206,8 +229,7 @@ Status ScanFolderJob::run(JobWorker& worker) {
                                                   : make_scan_file_job(ctx_, ref.uri, child_key);
   if (!child) {
     // 单个子项建不出来（基本不会发生）就跳过它，别让整个目录失败
-    log(LogLevel::Warn,
-        cat("job scan-folder 跳过子项 ", child_key, ": ", child.error().to_string()));
+    LOG_WARN << cat("job scan-folder 跳过子项 ", child_key, ": ", child.error().to_string());
     ++cursor_;
     if (cursor_ < pending_.size()) {
       yield_ = true;

@@ -1,7 +1,5 @@
 'use strict';
 
-const API = '/api';
-
 const ui = {
   select: document.getElementById('storage-select'),
   meta: document.getElementById('storage-meta'),
@@ -30,18 +28,20 @@ const state = {
   selected: null, // 详情面板当前展示的节点
   selection: new Set(), // Ctrl/⌘ 多选集合
   scanning: false,
-  mode: 'verify', // scan.file 的 mode：verify = 校验模式，full = 完整扫描
+  mode: 'verify', // 扫描的 mode：verify = 校验模式，full = 完整扫描
 };
 
-// 统一信封：POST /api {op, params} -> {data} / {data: null, errors: [...]}
-async function call(op, params = {}) {
+// REST 调用：成功直接返回 JSON 载荷，失败抛带 message/detail 的 Error
+async function request(method, path, body) {
+  const options = { method, headers: {} };
+  if (body !== undefined) {
+    options.headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(body);
+  }
+
   let response;
   try {
-    response = await fetch(API, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ op, params }),
-    });
+    response = await fetch(path, options);
   } catch (cause) {
     throw new Error(`无法连接服务：${cause.message}`);
   }
@@ -56,20 +56,28 @@ async function call(op, params = {}) {
     }
   }
 
-  const errors = payload && Array.isArray(payload.errors) ? payload.errors : [];
-  if (errors.length) {
-    const first = errors[0];
-    const message = first.message || first.code || '请求失败';
-    const detail = first.detail ? `（${first.detail}）` : '';
-    throw new Error(`${message}${detail}`);
-  }
   if (!response.ok) {
+    const error = payload && payload.error ? payload.error : null;
+    if (error) {
+      const message = error.message || error.code || '请求失败';
+      const detail = error.detail ? `（${error.detail}）` : '';
+      throw new Error(`${message}${detail}`);
+    }
     throw new Error(`HTTP ${response.status}`);
   }
-  if (!payload || !('data' in payload)) {
-    throw new Error('响应缺少 data 字段');
-  }
-  return payload.data;
+  return payload;
+}
+
+function apiGet(path) {
+  return request('GET', path);
+}
+
+function apiPost(path, body) {
+  return request('POST', path, body);
+}
+
+function storagePath(id, suffix = '') {
+  return `/api/storages/${encodeURIComponent(id)}${suffix}`;
 }
 
 function setMeta(storage) {
@@ -327,7 +335,8 @@ async function loadChildren(node, generation) {
   children.append(loading);
 
   try {
-    const data = await call('file.list', { storage_id: state.currentId, path });
+    const query = new URLSearchParams({ path });
+    const data = await apiGet(storagePath(state.currentId, `/files?${query}`));
     if (generation !== state.generation) {
       return;
     }
@@ -459,8 +468,8 @@ async function refreshStorages() {
   setMeta(null);
 
   try {
-    const data = await call('storage.list');
-    state.storages = Array.isArray(data && data.storages) ? data.storages : [];
+    const data = await apiGet('/api/storages');
+    state.storages = Array.isArray(data) ? data : [];
 
     if (!state.storages.length) {
       state.currentId = null;
@@ -468,7 +477,7 @@ async function refreshStorages() {
       option.textContent = '（无资源库）';
       ui.select.replaceChildren(option);
       ui.select.disabled = true;
-      setTreeMessage('还没有资源库。先通过 storage.upsert 创建。');
+      setTreeMessage('还没有资源库。先通过 POST /api/storages 创建。');
       showEmpty();
       return;
     }
@@ -541,8 +550,7 @@ async function runScan() {
   setScanResult('正在提交扫描任务…');
 
   try {
-    const data = await call('scan.file', {
-      storage_id: state.currentId,
+    const data = await apiPost(storagePath(state.currentId, '/scans'), {
       files: targets.files,
       folders: targets.folders,
       mode,

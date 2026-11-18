@@ -1,17 +1,9 @@
 #pragma once
 
 #include <cstdint>
-#include <ctime>
 #include <string>
 
 namespace sb {
-
-// -----------------------------------------------------------------------------
-// logging
-enum class LogLevel { Error = 0, Warn = 1, Info = 2, Debug = 3 };
-
-void set_log_level(LogLevel lvl);
-void log(LogLevel lvl, const std::string& msg);
 
 template <typename... Args> inline std::string cat(Args&&... args) {
   std::string out;
@@ -26,15 +18,15 @@ struct ObjectRef {
   std::string name; // last path segment (basename)
   std::uint64_t size = 0;
   std::int64_t mtime = 0; // epoch seconds, 0 = unknown
-  bool is_dir = false;    // WebDAV collection / S3 "directory" 前缀
+  bool is_dir = false;    // WebDAV collection
 };
 
 // -----------------------------------------------------------------------------
 // helpers
-// 去掉 query string、折叠重复斜杠、去尾部斜杠；对象存储签名参数不能进数据库。
+// 去掉 query string、折叠重复斜杠、去尾部斜杠；签名参数不能进数据库。
 std::string normalize_uri(const std::string& in);
 std::string join_uri(const std::string& base, const std::string& name);
-// 仅用于日志：把 X-Amz-Signature / Credential / token 之类的值打码。
+// 仅用于日志：把 URL 查询参数的值打码。
 std::string redact_uri(const std::string& in);
 std::string basename_of(const std::string& uri);
 
@@ -47,7 +39,5 @@ std::string trim(std::string s);
 
 // 逐字符转小写（只处理 ASCII）
 std::string to_lower(std::string s);
-
-timespec make_timespec(int seconds);
 
 } // namespace sb

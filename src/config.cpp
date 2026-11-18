@@ -4,35 +4,40 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <memory>
 #include <sstream>
 
-#include <nlohmann/json.hpp>
+#include <json/json.h>
 
 namespace sb {
 
 namespace {
 
-Result<std::string> json_string(const nlohmann::json& j, const char* key, const std::string& def,
-                                const std::string& path) {
-  const auto it = j.find(key);
-  if (it == j.end() || it->is_null()) {
-    return def;
-  }
-  if (!it->is_string()) {
-    return err(ErrorCode::Config, cat("配置项 '", key, "' 必须是字符串"), "", path);
-  }
-  return it->get<std::string>();
+bool is_integral(const Json::Value& v) {
+  return v.isInt() || v.isUInt() || v.isInt64() || v.isUInt64();
 }
 
-Result<int> json_int(const nlohmann::json& j, const char* key, int def, const std::string& path) {
-  const auto it = j.find(key);
-  if (it == j.end() || it->is_null()) {
+Result<std::string> json_string(const Json::Value& j, const char* key, const std::string& def,
+                                const std::string& path) {
+  if (!j.isMember(key) || j[key].isNull()) {
     return def;
   }
-  if (!it->is_number_integer()) {
+  const Json::Value& v = j[key];
+  if (!v.isString()) {
+    return err(ErrorCode::Config, cat("配置项 '", key, "' 必须是字符串"), "", path);
+  }
+  return v.asString();
+}
+
+Result<int> json_int(const Json::Value& j, const char* key, int def, const std::string& path) {
+  if (!j.isMember(key) || j[key].isNull()) {
+    return def;
+  }
+  const Json::Value& v = j[key];
+  if (!is_integral(v)) {
     return err(ErrorCode::Config, cat("配置项 '", key, "' 必须是整数"), "", path);
   }
-  return it->get<int>();
+  return v.asInt();
 }
 
 } // namespace
@@ -70,21 +75,23 @@ Result<LoadedConfig> load_config(const std::string& path) {
     return out; // 文件不存在：loaded=false，由调用方决定是否可接受
   }
 
-  nlohmann::json root;
-  try {
-    in >> root;
-  } catch (const nlohmann::json::exception& e) {
-    return err(ErrorCode::Config, "配置文件不是合法 JSON", e.what(), path);
+  Json::CharReaderBuilder builder;
+  Json::Value root;
+  std::string errs;
+  if (!Json::parseFromStream(builder, in, &root, &errs)) {
+    if (errs.empty()) {
+      errs = "无法解析";
+    }
+    return err(ErrorCode::Config, "配置文件不是合法 JSON", trim(errs), path);
   }
-  if (!root.is_object()) {
+  if (!root.isObject()) {
     return err(ErrorCode::Config, "配置文件顶层必须是对象", "", path);
   }
 
-  const auto db_it = root.find("database");
-  if (db_it == root.end() || !db_it->is_object()) {
+  if (!root.isMember("database") || !root["database"].isObject()) {
     return err(ErrorCode::Config, "缺少对象 'database'", "", path);
   }
-  const auto& db = *db_it;
+  const Json::Value& db = root["database"];
 
   auto& c = out.db;
   auto str_field = [&](const char* key, std::string& target) -> Status {
@@ -122,16 +129,17 @@ Result<LoadedConfig> load_config(const std::string& path) {
     return st.error();
 
   // server 块可选；缺省 127.0.0.1:8080
-  if (const auto srv = root.find("server"); srv != root.end() && !srv->is_null()) {
-    if (!srv->is_object()) {
+  if (root.isMember("server") && !root["server"].isNull()) {
+    const Json::Value& srv = root["server"];
+    if (!srv.isObject()) {
       return err(ErrorCode::Config, "配置项 'server' 必须是对象", "", path);
     }
-    auto bind = json_string(*srv, "bind", out.server.bind, path);
+    auto bind = json_string(srv, "bind", out.server.bind, path);
     if (!bind)
       return bind.error();
     out.server.bind = std::move(*bind);
 
-    auto port = json_int(*srv, "port", out.server.port, path);
+    auto port = json_int(srv, "port", out.server.port, path);
     if (!port)
       return port.error();
     out.server.port = *port;
@@ -139,12 +147,20 @@ Result<LoadedConfig> load_config(const std::string& path) {
       return err(ErrorCode::Config, "配置项 'server.port' 必须在 1..65535", "", path);
     }
 
-    auto threads = json_int(*srv, "scan_threads", out.server.scan_threads, path);
+    auto threads = json_int(srv, "scan_threads", out.server.scan_threads, path);
     if (!threads)
       return threads.error();
     out.server.scan_threads = *threads;
     if (out.server.scan_threads < 1 || out.server.scan_threads > 64) {
       return err(ErrorCode::Config, "配置项 'server.scan_threads' 必须在 1..64", "", path);
+    }
+
+    auto db_threads = json_int(srv, "db_threads", out.server.db_threads, path);
+    if (!db_threads)
+      return db_threads.error();
+    out.server.db_threads = *db_threads;
+    if (out.server.db_threads < 1 || out.server.db_threads > 64) {
+      return err(ErrorCode::Config, "配置项 'server.db_threads' 必须在 1..64", "", path);
     }
   }
 
@@ -162,26 +178,33 @@ Result<std::string> config_dump_redacted(const LoadedConfig& loaded) {
     return std::string("-- 未加载配置\n");
   }
   const auto& c = loaded.db;
-  nlohmann::json root;
+  Json::Value root(Json::objectValue);
   root["_path"] = loaded.path;
-  root["server"] = {
-      {"bind", loaded.server.bind},
-      {"port", loaded.server.port},
-      {"scan_threads", loaded.server.scan_threads},
-  };
-  root["database"] = {
-      {"host", c.host},
-      {"port", c.port},
-      {"dbname", c.dbname},
-      {"user", c.user},
-      {"password", c.password.empty() ? "" : "***"},
-      {"sslmode", c.sslmode},
-      {"connect_timeout", c.connect_timeout},
-      {"application_name", c.application_name},
-  };
+
+  Json::Value server(Json::objectValue);
+  server["bind"] = loaded.server.bind;
+  server["port"] = loaded.server.port;
+  server["scan_threads"] = loaded.server.scan_threads;
+  server["db_threads"] = loaded.server.db_threads;
+  root["server"] = server;
+
+  Json::Value database(Json::objectValue);
+  database["host"] = c.host;
+  database["port"] = c.port;
+  database["dbname"] = c.dbname;
+  database["user"] = c.user;
+  database["password"] = c.password.empty() ? "" : "***";
+  database["sslmode"] = c.sslmode;
+  database["connect_timeout"] = c.connect_timeout;
+  database["application_name"] = c.application_name;
+  root["database"] = database;
+
+  Json::StreamWriterBuilder writer;
+  writer["indentation"] = "  ";
+  writer["emitUTF8"] = true;
   try {
-    return root.dump(2) + "\n";
-  } catch (const nlohmann::json::exception& e) {
+    return Json::writeString(writer, root) + "\n";
+  } catch (const std::exception& e) {
     return err(ErrorCode::Internal, "序列化配置失败", e.what(), loaded.path);
   }
 }

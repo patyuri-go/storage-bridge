@@ -1,54 +1,9 @@
 #include "util.hpp"
 
-#include <atomic>
 #include <cctype>
-#include <chrono>
-#include <cstdio>
-#include <iostream>
-#include <mutex>
 #include <utility>
 
 namespace sb {
-
-namespace {
-std::atomic<int> g_level{static_cast<int>(LogLevel::Info)};
-std::mutex g_log_mutex;
-
-const char* level_tag(LogLevel lvl) {
-  switch (lvl) {
-  case LogLevel::Error:
-    return "ERROR";
-  case LogLevel::Warn:
-    return "WARN ";
-  case LogLevel::Info:
-    return "INFO ";
-  case LogLevel::Debug:
-    return "DEBUG";
-  }
-  return "?????";
-}
-} // namespace
-
-void set_log_level(LogLevel lvl) {
-  g_level.store(static_cast<int>(lvl));
-}
-void log(LogLevel lvl, const std::string& msg) {
-  if (static_cast<int>(lvl) > g_level.load()) {
-    return;
-  }
-  auto now = std::chrono::system_clock::now();
-  auto tt = std::chrono::system_clock::to_time_t(now);
-  auto ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
-  std::tm tm{};
-  gmtime_r(&tt, &tm);
-  char head[32];
-  std::snprintf(head, sizeof(head), "%02d:%02d:%02d.%03d", tm.tm_hour, tm.tm_min, tm.tm_sec,
-                static_cast<int>(ms));
-
-  std::lock_guard<std::mutex> lock(g_log_mutex);
-  std::cerr << head << " " << level_tag(lvl) << " " << msg << '\n';
-}
 
 std::string normalize_uri(const std::string& in) {
   std::string s = in;
@@ -138,13 +93,6 @@ std::string to_lower(std::string s) {
     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   }
   return s;
-}
-
-timespec make_timespec(int seconds) {
-  timespec ts{};
-  ts.tv_sec = seconds;
-  ts.tv_nsec = 0;
-  return ts;
 }
 
 std::string mime_type_for(const std::string& path) {

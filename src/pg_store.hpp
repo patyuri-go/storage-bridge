@@ -4,7 +4,6 @@
 #include "result.hpp"
 
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -56,10 +55,14 @@ struct FileRecordOutcome {
   bool entity_created = false;
 };
 
-// 远端 PostgreSQL 写入端（SOCI postgresql 后端，单 session + mutex）
+// 远端 PostgreSQL 写入端（SOCI postgresql 后端）。
+// 每个实例独占一条连接，只在持有它的那个线程里使用（由 DbPool 保证）。
 class PgStore {
 public:
-  static Result<std::unique_ptr<PgStore>> create(const DbConfig& cfg);
+  // 建立一条新连接；失败返回 Postgres 错误
+  static Result<std::unique_ptr<PgStore>> connect(const DbConfig& cfg);
+
+  explicit PgStore(std::unique_ptr<soci::session> db);
   ~PgStore();
 
   PgStore(const PgStore&) = delete;
@@ -94,7 +97,6 @@ private:
   static Error translate(const std::string& what, const soci::soci_error& e,
                          const std::string& context);
 
-  std::mutex mu_;
   std::unique_ptr<soci::session> db_;
 };
 

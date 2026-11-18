@@ -1,9 +1,10 @@
 #include "config.hpp"
-#include "pg_store.hpp"
+#include "job_worker.hpp"
 #include "util.hpp"
-#include "web/server.hpp"
+#include "web/bootstrap.hpp"
+#include "web/db_pool.hpp"
 
-#include <openssl/opensslv.h>
+#include <trantor/utils/Logger.h>
 
 #include <cstdlib>
 #include <fstream>
@@ -15,13 +16,13 @@ namespace {
 using namespace sb;
 
 void print_usage(const char* argv0) {
-  std::cout << R"(storage-bridge — 存储端（WebDAV/S3）↔ 远端 PostgreSQL 资源库
+  std::cout << R"(storage-bridge — 存储端（WebDAV）↔ 远端 PostgreSQL 资源库
 
 usage: )" << argv0
             << R"( --serve [options]
 
 服务模式:
-  --serve                  启动 HTTP 服务（POST /api 统一入口，读取远端 storage_nodes）
+  --serve                  启动 HTTP 服务（REST API，读取远端 storage_nodes）
   --listen <ip:port>       覆盖配置文件里的 server.bind/server.port
   --web-root <dir>         文件树静态资源目录，默认 web（相对当前目录）
 
@@ -30,7 +31,6 @@ usage: )" << argv0
   --print-config           打印加载到的配置（密码打码）后退出
 
 其他:
-  --version                打印各依赖库版本
   -v/--verbose             打印 Debug 日志
   -q/--quiet               只打错误
   -h/--help
@@ -58,19 +58,13 @@ bool next_value(int argc, char** argv, int& i, const char* flag, std::string& ou
 
 int main(int argc, char** argv) {
   Cli cli;
-  set_log_level(LogLevel::Info);
+  trantor::Logger::setLogLevel(trantor::Logger::kInfo);
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
 
     if (arg == "-h" || arg == "--help") {
       print_usage(argv[0]);
-      return 0;
-    } else if (arg == "--version") {
-      std::cout << "storage-bridge 0.1.0\n"
-                << "  davix       " << SB_DAVIX_VERSION << "\n"
-                << "  OpenSSL     " << OPENSSL_VERSION_TEXT << "\n"
-                << "  " << sb::web::library_info() << "\n";
       return 0;
     } else if (arg == "--config") {
       if (!next_value(argc, argv, i, "--config", cli.config_path))
@@ -86,9 +80,9 @@ int main(int argc, char** argv) {
       if (!next_value(argc, argv, i, "--web-root", cli.web_root))
         return 2;
     } else if (arg == "-v" || arg == "--verbose") {
-      set_log_level(LogLevel::Debug);
+      trantor::Logger::setLogLevel(trantor::Logger::kDebug);
     } else if (arg == "-q" || arg == "--quiet") {
-      set_log_level(LogLevel::Error);
+      trantor::Logger::setLogLevel(trantor::Logger::kError);
     } else {
       std::cerr << "unknown argument: " << arg << "\n";
       print_usage(argv[0]);
@@ -140,7 +134,6 @@ int main(int argc, char** argv) {
   web_opts.bind = cfg.server.bind;
   web_opts.port = cfg.server.port;
   web_opts.web_root = cli.web_root;
-  web_opts.scan_threads = cfg.server.scan_threads;
 
   // --listen 显式给出时覆盖配置文件
   if (!cli.listen.empty()) {
@@ -157,14 +150,34 @@ int main(int argc, char** argv) {
     }
   }
 
-  auto store = PgStore::create(cfg.db);
-  if (!store) {
-    std::cerr << "启动失败: " << store.error().to_string() << "\n";
+  // 先连数据库：任一连接失败立即退出（fail-fast），服务不会在无库状态下跑起来
+  auto pool = DbPool::create(cfg.db, cfg.server.db_threads);
+  if (!pool) {
+    std::cerr << "启动失败: " << pool.error().to_string() << "\n";
     return 1;
   }
-  if (Status st = web::serve(web_opts, **store); !st) {
-    log(LogLevel::Error, cat("http 服务失败: ", st.error().to_string()));
+
+  JobWorker jobs(cfg.server.scan_threads, 1000);
+  if (Status st = jobs.start(); !st) {
+    std::cerr << "启动失败: " << st.error().to_string() << "\n";
     return 1;
   }
+
+  LOG_INFO << cat("scan workers:  ", std::to_string(cfg.server.scan_threads));
+  LOG_INFO << cat("db threads:    ", std::to_string(cfg.server.db_threads));
+  LOG_INFO << cat("max queue:     1000");
+
+  if (Status st = web::serve(web_opts, **pool, jobs); !st) {
+    std::cerr << "http 服务失败: " << st.error().to_string() << "\n";
+    return 1;
+  }
+
+  // serve 返回 = 收到退出信号，队列已由信号处理器清空；这里只收尾
+  jobs.stop();
+  (*pool)->stop();
+  const auto stats = jobs.stats();
+  LOG_INFO << cat("scan workers stopped: completed=", std::to_string(stats.completed),
+                  " failed=", std::to_string(stats.failed),
+                  " yields=", std::to_string(stats.yields));
   return 0;
 }

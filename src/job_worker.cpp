@@ -2,6 +2,8 @@
 
 #include "util.hpp"
 
+#include <trantor/utils/Logger.h>
+
 #include <exception>
 #include <utility>
 
@@ -22,6 +24,7 @@ Status JobWorker::start() {
   started_ = true;
   accepting_ = true;
   stopping_ = false;
+  cancelled_ = false;
   threads_.reserve(thread_count_);
   for (std::size_t i = 0; i < thread_count_; ++i) {
     threads_.emplace_back(&JobWorker::loop, this);
@@ -62,11 +65,25 @@ Status JobWorker::push(std::unique_ptr<Job> job, bool internal) {
   return {};
 }
 
+void JobWorker::cancel() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    accepting_ = false;
+    cancelled_ = true;
+    files_.clear();
+    dirs_.clear();
+  }
+  cv_.notify_all();
+}
+
 void JobWorker::stop() {
   {
     std::lock_guard<std::mutex> lock(mu_);
     accepting_ = false;
+    cancelled_ = true;
     stopping_ = true;
+    files_.clear();
+    dirs_.clear();
   }
   cv_.notify_all();
   for (auto& t : threads_) {
@@ -102,9 +119,12 @@ void JobWorker::loop() {
     {
       std::unique_lock<std::mutex> lock(mu_);
       cv_.wait(lock, [this] { return stopping_ || !files_.empty() || !dirs_.empty(); });
+      if (stopping_) {
+        break;
+      }
       job = pop_locked();
       if (!job) {
-        break; // stopping_ 且两条队列都已清空
+        continue;
       }
     }
 
@@ -123,24 +143,26 @@ void JobWorker::loop() {
     bool requeued = false;
     {
       std::lock_guard<std::mutex> lock(mu_);
-      if (result && job && job->yielded()) {
+      if (!result) {
+        ++stats_.failed;
+        failure = result.error().to_string();
+      } else if (cancelled_) {
+        // 关闭中：结果丢弃，不再回队
+      } else if (job && job->yielded()) {
         // 协作式让出：不销毁、不计完成，放回队尾等下次调度。
         // 这里不受 max_queue_ 限制——只是把刚才取出来的那一条放回去。
         queue_for(kind).push_back(std::move(job));
         ++stats_.yields;
         requeued = true;
-      } else if (result) {
-        ++stats_.completed;
       } else {
-        ++stats_.failed;
-        failure = result.error().to_string();
+        ++stats_.completed;
       }
     }
     if (requeued) {
       cv_.notify_one();
     }
     if (!failure.empty()) {
-      log(LogLevel::Error, cat("job failed: ", failure));
+      LOG_ERROR << cat("job failed: ", failure);
     }
   }
 }

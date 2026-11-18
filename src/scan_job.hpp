@@ -1,8 +1,8 @@
 #pragma once
 
 #include "job.hpp"
-#include "pg_store.hpp"
 #include "storage.hpp"
+#include "web/db_pool.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -23,7 +23,7 @@ const char* to_string(ScanMode mode);
 struct ScanContext {
   std::shared_ptr<Storage> storage;
   std::string storage_id;
-  PgStore* pg = nullptr; // 哈希模式的写入端，不能为空
+  DbPool* db = nullptr; // 数据库连接池，不能为空
   ScanMode mode = ScanMode::Full;
 };
 

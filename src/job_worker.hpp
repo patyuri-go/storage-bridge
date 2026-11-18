@@ -2,6 +2,7 @@
 
 #include "job.hpp"
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -30,7 +31,8 @@ struct JobWorkerStats {
 // 队列总长度（files_ + dirs_）上限 max_queue，超了 submit/spawn 返回
 // ErrorCode::Busy。让出后重新入队的任务不受此限制（净增长为 0）。
 //
-// stop() 会先处理完队列再退出。
+// 关闭时不等队列：cancel() 清空两条队列并置取消标记，正在跑的任务在下一个
+// 检查点（每读完一块 / 每列完一层目录）自行退出。
 class JobWorker {
 public:
   explicit JobWorker(std::size_t threads = 1, std::size_t max_queue = 1000);
@@ -44,11 +46,19 @@ public:
   // 外部提交：stop() 之后拒绝新任务，队列满返回 Busy
   Status submit(std::unique_ptr<Job> job);
 
-  // 任务内部展开子任务：drain（stop 后仍在跑完队列）期间仍然允许
+  // 任务内部展开子任务
   Status spawn(std::unique_ptr<Job> job);
 
-  // 停止接收外部任务，把队列处理完后 join；未启动时为空操作
+  // 丢弃排队任务并置取消标记；不 join（由 stop() 负责）
+  void cancel();
+
+  // 取消 + join；未启动时为空操作
   void stop();
+
+  // 任务内部定期检查；返回 true 表示应立即放弃当前工作
+  bool cancelled() const {
+    return cancelled_.load(std::memory_order_relaxed);
+  }
 
   JobWorkerStats stats() const;
 
@@ -70,6 +80,7 @@ private:
   bool started_ = false;
   bool accepting_ = false;
   bool stopping_ = false;
+  std::atomic<bool> cancelled_{false};
 
   JobWorkerStats stats_;
 };

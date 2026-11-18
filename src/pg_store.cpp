@@ -4,6 +4,7 @@
 
 #include <soci/postgresql/soci-postgresql.h>
 #include <soci/soci.h>
+#include <trantor/utils/Logger.h>
 
 #include <string>
 
@@ -37,21 +38,22 @@ Error PgStore::translate(const std::string& what, const soci::soci_error& e,
   return err(ErrorCode::Postgres, std::move(msg), std::move(code), context);
 }
 
-Result<std::unique_ptr<PgStore>> PgStore::create(const DbConfig& cfg) {
-  std::unique_ptr<PgStore> self(new PgStore());
+Result<std::unique_ptr<PgStore>> PgStore::connect(const DbConfig& cfg) {
   try {
-    self->db_ = std::make_unique<soci::session>(soci::postgresql, cfg.conninfo());
+    auto db = std::make_unique<soci::session>(soci::postgresql, cfg.conninfo());
+    std::unique_ptr<PgStore> self(new PgStore(std::move(db)));
+    LOG_INFO << cat("postgres connected: ", cfg.redacted());
+    return self;
   } catch (const soci::soci_error& e) {
     return translate("连接 PostgreSQL 失败", e, cfg.redacted());
   }
-  log(LogLevel::Info, cat("postgres connected: ", cfg.redacted()));
-  return self;
 }
+
+PgStore::PgStore(std::unique_ptr<soci::session> db) : db_(std::move(db)) {}
 
 PgStore::~PgStore() = default;
 
 Status PgStore::ping() {
-  std::lock_guard<std::mutex> lock(mu_);
   try {
     int one = 0;
     *db_ << "select 1", soci::into(one);
@@ -62,13 +64,11 @@ Status PgStore::ping() {
 }
 
 Result<StorageNodeResult> PgStore::upsert_storage(const StorageNodeInput& in) {
-  std::lock_guard<std::mutex> lock(mu_);
-
   auto abort = [this](Error e) -> Result<StorageNodeResult> {
     try {
       db_->rollback();
     } catch (const soci::soci_error& re) {
-      log(LogLevel::Warn, cat("postgres rollback 失败: ", re.what()));
+      LOG_WARN << cat("postgres rollback 失败: ", re.what());
     }
     return e;
   };
@@ -118,7 +118,6 @@ Result<StorageNodeResult> PgStore::upsert_storage(const StorageNodeInput& in) {
 }
 
 Result<StorageNodeRecord> PgStore::get_storage(const std::string& storage_id) {
-  std::lock_guard<std::mutex> lock(mu_);
   try {
     StorageNodeRecord rec;
     std::string cfg;
@@ -141,7 +140,6 @@ Result<StorageNodeRecord> PgStore::get_storage(const std::string& storage_id) {
 }
 
 Result<std::vector<StorageNodeRecord>> PgStore::list_storages() {
-  std::lock_guard<std::mutex> lock(mu_);
   try {
     StorageNodeRecord rec;
     std::string cfg;
@@ -169,18 +167,17 @@ Result<std::vector<StorageNodeRecord>> PgStore::list_storages() {
 Result<FileRecordOutcome> PgStore::record_file(const std::string& storage_id,
                                                const std::string& key, const std::string& sha256,
                                                long long size, const std::string& mime_type) {
-  std::lock_guard<std::mutex> lock(mu_);
-
   auto rollback_quietly = [this] {
     try {
       db_->rollback();
     } catch (const soci::soci_error& re) {
-      log(LogLevel::Warn, cat("postgres rollback 失败: ", re.what()));
+      LOG_WARN << cat("postgres rollback 失败: ", re.what());
     }
   };
 
-  // 多个 worker 可能同时算出同一个新哈希，撞 entities_sha256_key 后重试一次就够了
-  for (int attempt = 0; attempt < 2; ++attempt) {
+  // 多个 worker 可能同时算出同一个新哈希，撞 entities_sha256_key 后重试
+  constexpr int kMaxAttempts = 4;
+  for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
     try {
       db_->begin();
 
@@ -250,7 +247,7 @@ Result<FileRecordOutcome> PgStore::record_file(const std::string& storage_id,
       return out;
     } catch (const soci::soci_error& e) {
       Error translated = translate("写入 entities / entity_locations 失败", e, key);
-      const bool retryable = (translated.detail == "23505") && attempt == 0;
+      const bool retryable = (translated.detail == "23505") && attempt + 1 < kMaxAttempts;
       rollback_quietly();
       if (retryable) {
         continue;
@@ -265,7 +262,6 @@ Result<FileRecordOutcome> PgStore::record_file(const std::string& storage_id,
 
 Result<bool> PgStore::location_matches_size(const std::string& storage_id,
                                             const std::string& suffix_key, long long size) {
-  std::lock_guard<std::mutex> lock(mu_);
   try {
     // 根下的文件 key 就是 "/f1.txt"，深层的是 "/a/b/f1.txt"；两种都算命中
     const std::string pattern = cat("%/", suffix_key);

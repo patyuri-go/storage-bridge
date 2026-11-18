@@ -28,6 +28,8 @@ struct ServerConfig {
   int port = 8080;
   // 常驻扫描 worker 的线程数（1..64）
   int scan_threads = 4;
+  // 数据库连接池的线程数（1..64），每条线程独占一个连接
+  int db_threads = 8;
 };
 
 struct LoadedConfig {

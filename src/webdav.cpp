@@ -1,52 +1,20 @@
-#define ASIO_STANDALONE
-
 #include "webdav.hpp"
 
 #include "util.hpp"
 
-#include <asio.hpp>
-#include <asio/ssl.hpp>
-#include <asio/ssl/error.hpp>
-#include <openssl/ssl.h>
-
-#include <sys/socket.h>
-#include <sys/time.h>
+#include <curl/curl.h>
 
 #include <algorithm>
-#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <memory>
-#include <sstream>
 #include <utility>
 
 namespace sb::webdav {
 
 namespace {
-
-constexpr const char* kB64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-std::string base64(const std::string& in) {
-  std::string out;
-  int val = 0;
-  int bits = -6;
-  for (const unsigned char c : in) {
-    val = (val << 8) + c;
-    bits += 8;
-    while (bits >= 0) {
-      out.push_back(kB64[(val >> bits) & 0x3F]);
-      bits -= 6;
-    }
-  }
-  if (bits > -6) {
-    out.push_back(kB64[((val << 8) >> (bits + 8)) & 0x3F]);
-  }
-  while (out.size() % 4 != 0) {
-    out.push_back('=');
-  }
-  return out;
-}
 
 int hexValue(unsigned char c) {
   if (c >= '0' && c <= '9') {
@@ -160,184 +128,78 @@ std::string extractTag(const std::string& block, const std::string& name) {
   }
 }
 
-void setTimeout(asio::ip::tcp::socket& sock, int seconds) {
-  struct timeval tv {};
-  tv.tv_sec = seconds;
-  setsockopt(sock.native_handle(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-  setsockopt(sock.native_handle(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+void ensureCurlGlobal() {
+  static const bool initialized = [] {
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    return true;
+  }();
+  (void)initialized;
 }
 
-template <typename SyncStream> std::string readAll(SyncStream& stream) {
+// 空格必须编码，否则 libcurl 会直接拒绝该 URL
+std::string encodeSpaces(const std::string& path) {
   std::string out;
-  char buf[16384];
-  std::error_code ec;
-  for (;;) {
-    const std::size_t n = stream.read_some(asio::buffer(buf, sizeof(buf)), ec);
-    if (n > 0) {
-      out.append(buf, n);
-    }
-    if (ec) {
-      break;
+  out.reserve(path.size());
+  for (const char c : path) {
+    if (c == ' ') {
+      out += "%20";
+    } else {
+      out += c;
     }
   }
   return out;
 }
 
-std::string dechunk(const std::string& in) {
-  std::string out;
-  std::size_t pos = 0;
-  while (pos < in.size()) {
-    const std::size_t eol = in.find("\r\n", pos);
-    if (eol == std::string::npos) {
-      break;
-    }
-    const long n = std::strtol(in.substr(pos, eol - pos).c_str(), nullptr, 16);
-    if (n <= 0) {
-      break;
-    }
-    pos = eol + 2;
-    out.append(in, pos, static_cast<std::size_t>(n));
-    pos += static_cast<std::size_t>(n) + 2;
-  }
-  return out;
-}
-
-Response parseResponse(const std::string& raw) {
-  Response res;
-  const std::size_t head_end = raw.find("\r\n\r\n");
-  if (head_end == std::string::npos) {
-    return res;
-  }
-  std::istringstream head(raw.substr(0, head_end));
-  std::string line;
-  std::getline(head, line);
-  {
-    const std::size_t sp = line.find(' ');
-    if (sp != std::string::npos) {
-      res.status = std::atoi(line.substr(sp + 1).c_str());
-    }
-  }
-  while (std::getline(head, line)) {
-    if (!line.empty() && line.back() == '\r') {
-      line.pop_back();
-    }
-    const std::size_t colon = line.find(':');
-    if (colon != std::string::npos) {
-      res.headers[to_lower(trim(line.substr(0, colon)))] = trim(line.substr(colon + 1));
-    }
-  }
-  std::string body = raw.substr(head_end + 4);
-  const auto te = res.headers.find("transfer-encoding");
-  if (te != res.headers.end() && to_lower(te->second).find("chunked") != std::string::npos) {
-    body = dechunk(body);
-  }
-  res.body = std::move(body);
-  return res;
-}
-
-template <typename SyncStream> Response doExchange(SyncStream& stream, const std::string& request) {
-  std::error_code ec;
-  asio::write(stream, asio::buffer(request), ec);
-  if (ec) {
-    return Response{};
-  }
-  return parseResponse(readAll(stream));
-}
-
-bool isRedirect(int status) {
-  return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
-}
-
-std::string buildRequestString(const Url& target, const ClientOptions& opts,
-                               const std::string& method, const std::string& path,
-                               const std::vector<std::string>& extra, const std::string& body,
-                               bool send_auth) {
-  std::string safe_path = path;
-  for (std::size_t i = 0; i < safe_path.size(); ++i) {
-    if (safe_path[i] == ' ') {
-      safe_path.replace(i, 1, "%20");
-      i += 2;
-    }
-  }
-
-  std::string req = method + " " + safe_path + " HTTP/1.1\r\n";
-  req += "Host: " + target.host + "\r\n";
-  if (send_auth && (!target.user.empty() || !target.pass.empty())) {
-    req += "Authorization: Basic " + base64(target.user + ":" + target.pass) + "\r\n";
-  }
-  req += "User-Agent: " + opts.user_agent + "\r\n";
-  req += "Accept: */*\r\n";
-  for (const auto& h : extra) {
-    req += h + "\r\n";
-  }
-  if (!body.empty() || method == "PUT" || method == "POST") {
-    req += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-  }
-  req += "Connection: close\r\n\r\n";
-  req += body;
-  return req;
-}
-
-void setupTls(asio::ssl::context& ctx, bool verify) {
-  if (verify) {
-    ctx.set_default_verify_paths();
-    ctx.set_verify_mode(asio::ssl::verify_peer);
-  } else {
-    ctx.set_verify_mode(asio::ssl::verify_none);
+void applyCommonOptions(CURL* handle, const Url& target, const ClientOptions& opts,
+                        const std::string& url) {
+  curl_easy_setopt(handle, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+  curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(handle, CURLOPT_MAXREDIRS, 5L);
+  curl_easy_setopt(handle, CURLOPT_USERAGENT, opts.user_agent.c_str());
+  curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, static_cast<long>(opts.timeout));
+  // 用低速率超时代替 socket 级 recv/send 超时：整块传输可以很慢，
+  // 但连续 timeout 秒没有任何进展就判定失败。
+  curl_easy_setopt(handle, CURLOPT_LOW_SPEED_LIMIT, 1L);
+  curl_easy_setopt(handle, CURLOPT_LOW_SPEED_TIME, static_cast<long>(opts.timeout));
+  curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, opts.ssl_verify ? 1L : 0L);
+  curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, opts.ssl_verify ? 2L : 0L);
+  if (!target.user.empty() || !target.pass.empty()) {
+    curl_easy_setopt(handle, CURLOPT_HTTPAUTH, static_cast<long>(CURLAUTH_BASIC));
+    curl_easy_setopt(handle, CURLOPT_USERNAME, target.user.c_str());
+    curl_easy_setopt(handle, CURLOPT_PASSWORD, target.pass.c_str());
   }
 }
 
-// 解析绝对 Location（http://host:port/path）到 Url
-bool parseAbsoluteLocation(const std::string& loc, Url& out) {
-  if (!parseUrl(loc, out)) {
+// 记录响应头；每见到新的状态行就清空（重定向/100-continue 会多次出现）
+bool absorbHeaderLine(std::map<std::string, std::string>& headers, const char* data,
+                      std::size_t len) {
+  std::string line(data, len);
+  while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+    line.pop_back();
+  }
+  if (line.rfind("HTTP/", 0) == 0) {
+    headers.clear();
     return false;
   }
-  out.user.clear();
-  out.pass.clear();
+  const std::size_t colon = line.find(':');
+  if (colon == std::string::npos) {
+    return false;
+  }
+  headers[to_lower(trim(line.substr(0, colon)))] = trim(line.substr(colon + 1));
   return true;
 }
 
-Response doRequest(const Url& target, const ClientOptions& opts, const std::string& method,
-                   const std::string& path, const std::vector<std::string>& extra,
-                   const std::string& body, bool send_auth) {
-  asio::io_context ioc;
-  asio::ip::tcp::resolver resolver(ioc);
-  const std::string port = target.port.empty() ? (target.https ? "443" : "80") : target.port;
+std::size_t writeToString(char* ptr, std::size_t size, std::size_t nmemb, void* userdata) {
+  auto* out = static_cast<std::string*>(userdata);
+  out->append(ptr, size * nmemb);
+  return size * nmemb;
+}
 
-  std::error_code ec;
-  const auto results = resolver.resolve(target.host, port, ec);
-  if (ec) {
-    return Response{};
-  }
-
-  const std::string req = buildRequestString(target, opts, method, path, extra, body, send_auth);
-
-  if (target.https) {
-    asio::ssl::context ctx(asio::ssl::context::tls_client);
-    setupTls(ctx, opts.ssl_verify);
-    asio::ssl::stream<asio::ip::tcp::socket> stream(ioc, ctx);
-    asio::connect(stream.next_layer(), results, ec);
-    if (ec) {
-      return Response{};
-    }
-    setTimeout(stream.next_layer(), opts.timeout);
-    if (!SSL_set_tlsext_host_name(stream.native_handle(), target.host.c_str())) {
-      return Response{};
-    }
-    stream.handshake(asio::ssl::stream_base::client, ec);
-    if (ec) {
-      return Response{};
-    }
-    return doExchange(stream, req);
-  }
-
-  asio::ip::tcp::socket sock(ioc);
-  asio::connect(sock, results, ec);
-  if (ec) {
-    return Response{};
-  }
-  setTimeout(sock, opts.timeout);
-  return doExchange(sock, req);
+std::size_t headerToMap(char* ptr, std::size_t size, std::size_t nmemb, void* userdata) {
+  auto* headers = static_cast<std::map<std::string, std::string>*>(userdata);
+  absorbHeaderLine(*headers, ptr, size * nmemb);
+  return size * nmemb;
 }
 
 } // namespace
@@ -477,30 +339,50 @@ std::string Response::header(const std::string& key) const {
 
 Response Client::request(const std::string& method, const std::string& path,
                          const std::vector<std::string>& extra, const std::string& body) {
-  Response resp = doRequest(base_, opts_, method, path, extra, body, true);
-  int redirects = 0;
-  while (isRedirect(resp.status) && redirects < 5) {
-    const std::string loc = resp.header("location");
-    if (loc.empty()) {
-      break;
-    }
-    Url next = base_;
-    std::string next_path = loc;
-    if (isWebdavUrl(loc)) {
-      if (!parseAbsoluteLocation(loc, next)) {
-        break;
-      }
-      next_path = next.path;
-    } else if (!loc.empty() && loc.front() != '/') {
-      const std::size_t slash = base_.path.rfind('/');
-      next_path =
-          (slash == std::string::npos ? std::string("/") : base_.path.substr(0, slash + 1)) + loc;
-    }
-    const bool same =
-        (next.host == base_.host && next.port == base_.port && next.https == base_.https);
-    resp = doRequest(next, opts_, method, next_path, extra, body, same);
-    ++redirects;
+  ensureCurlGlobal();
+
+  Response resp;
+  CURL* handle = curl_easy_init();
+  if (handle == nullptr) {
+    return resp;
   }
+
+  applyCommonOptions(handle, base_, opts_, buildUrl(base_, encodeSpaces(path)));
+  curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, writeToString);
+  curl_easy_setopt(handle, CURLOPT_WRITEDATA, &resp.body);
+  curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, headerToMap);
+  curl_easy_setopt(handle, CURLOPT_HEADERDATA, &resp.headers);
+
+  curl_slist* headers = nullptr;
+  for (const auto& h : extra) {
+    headers = curl_slist_append(headers, h.c_str());
+  }
+  if (headers != nullptr) {
+    curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
+  }
+
+  if (method != "GET") {
+    curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, method.c_str());
+  }
+  if (!body.empty() || method == "PUT" || method == "POST") {
+    curl_easy_setopt(handle, CURLOPT_POSTFIELDS, body.data());
+    curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+  }
+
+  const CURLcode rc = curl_easy_perform(handle);
+
+  long status = 0;
+  curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
+
+  if (headers != nullptr) {
+    curl_slist_free_all(headers);
+  }
+  curl_easy_cleanup(handle);
+
+  if (rc != CURLE_OK) {
+    return Response{};
+  }
+  resp.status = static_cast<int>(status);
   return resp;
 }
 
@@ -517,174 +399,159 @@ Response Client::propfind(const std::string& path, int depth) {
 
 namespace {
 
-void parseStreamHead(const std::string& head, Stream& s) {
-  const std::size_t line_end = head.find("\r\n");
-  const std::string status_line =
-      head.substr(0, line_end == std::string::npos ? head.size() : line_end);
-  const std::size_t sp = status_line.find(' ');
-  if (sp != std::string::npos) {
-    s.status = std::atoi(status_line.c_str() + sp + 1);
+// 一次 GET 传输的状态；析构时保证 curl 句柄被释放
+struct StreamState {
+  CURLM* multi = nullptr;
+  CURL* easy = nullptr;
+  curl_slist* slist = nullptr;
+  std::string buffer;
+  std::map<std::string, std::string> headers;
+  int status = 0;
+  bool done = false;
+  bool failed = false;
+
+  ~StreamState() { shutdown(); }
+
+  void shutdown() {
+    if (multi != nullptr && easy != nullptr) {
+      curl_multi_remove_handle(multi, easy);
+    }
+    if (easy != nullptr) {
+      curl_easy_cleanup(easy);
+      easy = nullptr;
+    }
+    if (slist != nullptr) {
+      curl_slist_free_all(slist);
+      slist = nullptr;
+    }
+    if (multi != nullptr) {
+      curl_multi_cleanup(multi);
+      multi = nullptr;
+    }
+    buffer.clear();
+    done = true;
   }
-  std::size_t pos = (line_end == std::string::npos) ? head.size() : line_end + 2;
-  while (pos < head.size()) {
-    const std::size_t e = head.find("\r\n", pos);
-    if (e == std::string::npos) {
-      break;
-    }
-    const std::string line = head.substr(pos, e - pos);
-    if (line.empty()) {
-      break;
-    }
-    const std::size_t colon = line.find(':');
-    if (colon != std::string::npos) {
-      s.headers[to_lower(trim(line.substr(0, colon)))] = trim(line.substr(colon + 1));
-    }
-    pos = e + 2;
-  }
+};
+
+std::size_t streamWrite(char* ptr, std::size_t size, std::size_t nmemb, void* userdata) {
+  auto* state = static_cast<StreamState*>(userdata);
+  state->buffer.append(ptr, size * nmemb);
+  return size * nmemb;
 }
 
-template <typename StreamT>
-Stream openOnStream(std::shared_ptr<StreamT> stream, const std::string& req) {
-  std::error_code ec;
-  asio::write(*stream, asio::buffer(req), ec);
-  if (ec) {
-    return Stream{};
+std::size_t streamHeader(char* ptr, std::size_t size, std::size_t nmemb, void* userdata) {
+  auto* state = static_cast<StreamState*>(userdata);
+  const std::size_t len = size * nmemb;
+  std::string line(ptr, len);
+  while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+    line.pop_back();
   }
-  auto pending = std::make_shared<std::string>();
-  char tmp[16384];
-  while (true) {
-    const std::size_t got = stream->read_some(asio::buffer(tmp, sizeof(tmp)), ec);
-    if (ec || got == 0) {
-      return Stream{};
+  if (line.rfind("HTTP/", 0) == 0) {
+    // "HTTP/1.1 206 Partial Content"
+    state->headers.clear();
+    const std::size_t first = line.find(' ');
+    if (first != std::string::npos) {
+      state->status = static_cast<int>(std::strtol(line.c_str() + first + 1, nullptr, 10));
     }
-    pending->append(tmp, got);
-    if (pending->find("\r\n\r\n") != std::string::npos) {
-      break;
-    }
-    if (pending->size() > 131072) {
-      return Stream{};
-    }
+    return len;
   }
-  const std::size_t head_end = pending->find("\r\n\r\n");
-  const std::string head = pending->substr(0, head_end + 2);
-  *pending = pending->substr(head_end + 4);
-
-  Stream s;
-  parseStreamHead(head, s);
-  s.read = [stream, pending](char* buf, std::size_t n) -> long long {
-    if (!pending->empty()) {
-      const std::size_t take = std::min(n, pending->size());
-      std::memcpy(buf, pending->data(), take);
-      pending->erase(0, take);
-      return static_cast<long long>(take);
-    }
-    std::error_code read_ec;
-    const std::size_t got = stream->read_some(asio::buffer(buf, n), read_ec);
-    // 对端把连接关掉是正常 EOF，不是错误（服务器普遍带 Connection: close）
-    if (read_ec == asio::error::eof || read_ec == asio::ssl::error::stream_truncated) {
-      return 0;
-    }
-    if (read_ec) {
-      return -1;
-    }
-    return static_cast<long long>(got);
-  };
-  s.close = [stream]() {
-    std::error_code close_ec;
-    stream->lowest_layer().shutdown(asio::ip::tcp::socket::shutdown_both, close_ec);
-    stream->lowest_layer().close(close_ec);
-  };
-  return s;
+  absorbHeaderLine(state->headers, ptr, len);
+  return len;
 }
 
 } // namespace
 
 Stream openStream(const Url& base, const std::string& path, const std::vector<std::string>& extra,
                   const ClientOptions& opts) {
-  Url target = base;
-  std::string req_path = path;
-  bool send_auth = true;
+  ensureCurlGlobal();
 
-  for (int attempt = 0; attempt < 6; ++attempt) {
-    const std::string port = target.port.empty() ? (target.https ? "443" : "80") : target.port;
-    // ioc 必须活到 socket 析构之后，否则 socket 析构时会去访问已释放的 reactor。
-    // 这里让它挂在 socket 的自定义 deleter 上，比 ioc 是局部变量活得久。
-    auto ioc = std::make_shared<asio::io_context>();
-    asio::ip::tcp::resolver resolver(*ioc);
-    std::error_code ec;
-    const auto results = resolver.resolve(target.host, port, ec);
-    if (ec) {
-      return Stream{};
-    }
-    const std::string req = buildRequestString(target, opts, "GET", req_path, extra, "", send_auth);
-
-    Stream s;
-    if (target.https) {
-      auto ctx = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_client);
-      setupTls(*ctx, opts.ssl_verify);
-      using TlsSocket = asio::ssl::stream<asio::ip::tcp::socket>;
-      std::shared_ptr<TlsSocket> stream(new TlsSocket(*ioc, *ctx),
-                                        [ioc, ctx](TlsSocket* p) { delete p; });
-      asio::connect(stream->next_layer(), results, ec);
-      if (ec) {
-        return Stream{};
-      }
-      setTimeout(stream->next_layer(), opts.timeout);
-      if (!SSL_set_tlsext_host_name(stream->native_handle(), target.host.c_str())) {
-        return Stream{};
-      }
-      stream->handshake(asio::ssl::stream_base::client, ec);
-      if (ec) {
-        return Stream{};
-      }
-      s = openOnStream(stream, req);
-    } else {
-      using PlainSocket = asio::ip::tcp::socket;
-      std::shared_ptr<PlainSocket> stream(new PlainSocket(*ioc),
-                                          [ioc](PlainSocket* p) { delete p; });
-      asio::connect(*stream, results, ec);
-      if (ec) {
-        return Stream{};
-      }
-      setTimeout(*stream, opts.timeout);
-      s = openOnStream(stream, req);
-    }
-
-    if (s.status == 0) {
-      return Stream{};
-    }
-    if (!isRedirect(s.status)) {
-      return s;
-    }
-
-    const auto it = s.headers.find("location");
-    const std::string location = (it == s.headers.end()) ? std::string() : it->second;
-    s.reset();
-    if (location.empty()) {
-      return Stream{};
-    }
-
-    Url next;
-    if (isWebdavUrl(location)) {
-      if (!parseAbsoluteLocation(location, next)) {
-        return Stream{};
-      }
-    } else {
-      next = target;
-      if (location.front() == '/') {
-        next.path = location;
-      } else {
-        const std::size_t slash = target.path.rfind('/');
-        next.path =
-            (slash == std::string::npos ? std::string("/") : target.path.substr(0, slash + 1)) +
-            location;
-      }
-    }
-    req_path = next.path;
-    target = next;
-    send_auth = (next.host == base.host && next.port == base.port && next.https == base.https);
+  auto state = std::make_shared<StreamState>();
+  state->multi = curl_multi_init();
+  state->easy = curl_easy_init();
+  if (state->multi == nullptr || state->easy == nullptr) {
+    return Stream{};
   }
-  return Stream{};
+
+  applyCommonOptions(state->easy, base, opts, buildUrl(base, encodeSpaces(path)));
+  curl_easy_setopt(state->easy, CURLOPT_WRITEFUNCTION, streamWrite);
+  curl_easy_setopt(state->easy, CURLOPT_WRITEDATA, state.get());
+  curl_easy_setopt(state->easy, CURLOPT_HEADERFUNCTION, streamHeader);
+  curl_easy_setopt(state->easy, CURLOPT_HEADERDATA, state.get());
+
+  curl_slist* headers = nullptr;
+  for (const auto& h : extra) {
+    headers = curl_slist_append(headers, h.c_str());
+  }
+  if (headers != nullptr) {
+    curl_easy_setopt(state->easy, CURLOPT_HTTPHEADER, headers);
+  }
+  state->slist = headers;
+
+  const bool added = curl_multi_add_handle(state->multi, state->easy) == CURLM_OK;
+  if (!added) {
+    return Stream{};
+  }
+
+  // 先推进到拿到响应头（status 已知）为止，之后由 read() 按需继续拉取
+  while (state->status == 0 && !state->done) {
+    int running = 0;
+    if (curl_multi_perform(state->multi, &running) != CURLM_OK) {
+      state->failed = true;
+      break;
+    }
+    if (running == 0) {
+      state->done = true;
+      break;
+    }
+    if (state->status != 0) {
+      break;
+    }
+    int numfds = 0;
+    if (curl_multi_poll(state->multi, nullptr, 0, 1000, &numfds) != CURLM_OK) {
+      state->failed = true;
+      break;
+    }
+  }
+
+  if (state->failed || state->status == 0) {
+    return Stream{};
+  }
+
+  Stream s;
+  s.status = state->status;
+  s.headers = state->headers;
+  s.read = [state](char* buf, std::size_t n) -> long long {
+    while (state->buffer.empty()) {
+      if (state->done || state->failed) {
+        return state->failed ? -1 : 0;
+      }
+      int running = 0;
+      if (curl_multi_perform(state->multi, &running) != CURLM_OK) {
+        state->failed = true;
+        return -1;
+      }
+      if (running == 0) {
+        state->done = true;
+      }
+      if (!state->buffer.empty()) {
+        break;
+      }
+      if (state->done) {
+        return 0;
+      }
+      int numfds = 0;
+      if (curl_multi_poll(state->multi, nullptr, 0, 1000, &numfds) != CURLM_OK) {
+        state->failed = true;
+        return -1;
+      }
+    }
+    const std::size_t take = std::min(n, state->buffer.size());
+    std::memcpy(buf, state->buffer.data(), take);
+    state->buffer.erase(0, take);
+    return static_cast<long long>(take);
+  };
+  s.close = [state]() { state->shutdown(); };
+  return s;
 }
 
 std::vector<Resource> parsePropfind(const std::string& xml) {

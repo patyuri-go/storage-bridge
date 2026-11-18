@@ -8,15 +8,14 @@
 #include <string>
 #include <vector>
 
-// 自写 WebDAV 客户端（asio + OpenSSL，HTTP/1.1，Basic 认证）。
+// 自写 WebDAV 客户端（libcurl，HTTP/1.1，Basic 认证）。
 //
 // 为什么不用 davix：davix 0.8.5 的 PROPFIND body 是源码里硬编码的常量
 // （src/fileops/davmeta.cpp 的 stat_listing，含
 // <D:resourcetype><D:collection/></D:resourcetype>），没有任何 API 可定制；
-// 而 openlist 对带这个结构的 body 直接返回 404。davix 的
-// setClientLoginPassword 在 libcurl 后端上也完全无效（既不预先发
-// Authorization 也不做 401 重试）。因此 WebDAV 一侧自实现，davix 只保留给 S3。
-// 详见 docs/feasibility.md「openlist 兼容性」。
+// 而 openlist 对带这个结构的 body 直接返回 404；它的 setClientLoginPassword
+// 在 libcurl 后端上也完全无效（既不预先发 Authorization 也不做 401 重试）。
+// 因此 PROPFIND/GET 全部由本文件基于 libcurl 实现。
 
 namespace sb::webdav {
 

@@ -1,6 +1,8 @@
 opencode.json
 .cache
-build
+build*/
+vcpkg_installed/
+CMakeUserPresets.json
 config
 document
 scripts

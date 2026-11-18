@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(storage-bridge
   VERSION 0.1.0
-  DESCRIPTION "Bridge between object storage (WebDAV/S3) and a remote PostgreSQL catalog"
+  DESCRIPTION "Bridge between WebDAV storage and a remote PostgreSQL catalog"
   LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -21,27 +21,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(SB_FORMAT_ON_BUILD "运行 clang-format 后再编译（需要 clang-format）" ON)
 find_program(CLANG_FORMAT_EXE NAMES clang-format clang-format-18 clang-format-17)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-
 # ----------------------------------------------------------------------------- dependencies
-# 全部通过系统开发包发现，不使用任何 FetchContent / 源码内嵌。
-# apt: davix-dev libsoci-dev libsoci-postgresql4.0 libpq-dev libboost-dev pkg-config
+# 全部依赖由 vcpkg manifest 模式提供（见 vcpkg.json + CMakePresets.json）。
+# 手动构建时需指定工具链：-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(DAVIX REQUIRED IMPORTED_TARGET davix)
-
-# HTTP 层（Web 前端后端）：cpp-httplib 只提供 pkg-config；nlohmann_json 有 CMake config
-pkg_check_modules(HTTPLIB REQUIRED IMPORTED_TARGET cpp-httplib)
-find_package(nlohmann_json 3.11 REQUIRED)
-
-# 统一走 SOCI：postgresql = 远端 entity 库（后端仍需系统 libpq）
-find_package(SOCI REQUIRED COMPONENTS postgresql)
-find_package(PostgreSQL REQUIRED) # 只用于 soci/postgresql 需要的 libpq-fe.h，不直接调用 libpq
-find_package(OpenSSL REQUIRED)    # 流式 SHA-256 + WebDAV TLS
+find_package(Drogon CONFIG REQUIRED)          # HTTP 框架 + trantor 日志
+find_package(CURL CONFIG REQUIRED)            # WebDAV 客户端传输层
+find_package(SOCI CONFIG REQUIRED COMPONENTS PostgreSQL) # 远端 entity 库
+find_package(jsoncpp CONFIG REQUIRED)         # 配置 / REST 载荷
+find_package(OpenSSL REQUIRED)                # 流式 SHA-256 + TLS 后端
 find_package(Threads REQUIRED)
-
-# 自写 WebDAV 客户端用 standalone asio（header-only，apt: libasio-dev）
-find_path(ASIO_INCLUDE_DIR NAMES asio.hpp REQUIRED)
 
 # ----------------------------------------------------------------------------- target
 add_library(storage_bridge_core STATIC
@@ -54,22 +43,32 @@ add_library(storage_bridge_core STATIC
   src/webdav.cpp
   src/config.cpp
   src/pg_store.cpp
-  src/web/server.cpp)
+  src/web/app_context.cpp
+  src/web/db_pool.cpp
+  src/web/json_util.cpp
+  src/web/storage_target.cpp)
 target_include_directories(storage_bridge_core PUBLIC src)
-target_include_directories(storage_bridge_core PRIVATE ${PostgreSQL_INCLUDE_DIRS} ${ASIO_INCLUDE_DIR})
 target_link_libraries(storage_bridge_core PUBLIC
-  PkgConfig::DAVIX
-  SOCI::Core SOCI::PostgreSQL
+  Drogon::Drogon
+  CURL::libcurl
+  SOCI::SOCI
+  JsonCpp::JsonCpp
   OpenSSL::Crypto
   OpenSSL::SSL
-  PkgConfig::HTTPLIB
-  nlohmann_json::nlohmann_json
   Threads::Threads)
 target_compile_options(storage_bridge_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
-target_compile_definitions(storage_bridge_core PUBLIC SB_DAVIX_VERSION="${DAVIX_VERSION}")
 
-add_executable(storage-bridge src/main.cpp)
+# 控制器靠 Drogon 反射做静态注册，把 *.cpp 编进可执行文件（而不是静态库），
+# 避免链接器把“没有外部引用的”翻译单元丢掉。
+file(GLOB SB_CONTROLLER_SOURCES CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/web/controllers/*.cpp)
+
+add_executable(storage-bridge
+  src/main.cpp
+  src/web/bootstrap.cpp
+  ${SB_CONTROLLER_SOURCES})
 target_link_libraries(storage-bridge PRIVATE storage_bridge_core)
+target_compile_options(storage-bridge PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
 if(CLANG_FORMAT_EXE)
   file(GLOB_RECURSE SB_FORMAT_SOURCES CONFIGURE_DEPENDS
@@ -95,13 +94,11 @@ endif()
 install(TARGETS storage-bridge RUNTIME DESTINATION bin)
 
 message(STATUS "")
-message(STATUS "storage-bridge ${PROJECT_VERSION}")
-message(STATUS "  davix      : ${DAVIX_VERSION} (${DAVIX_LIBRARIES})")
-message(STATUS "  SOCI       : ${SOCI_INCLUDE_DIR}")
+message(STATUS "storage-bridge ${PROJECT_VERSION} (vcpkg manifest)")
+message(STATUS "  drogon     : ${Drogon_VERSION}")
+message(STATUS "  curl       : ${CURL_VERSION_STRING}")
+message(STATUS "  soci       : ${SOCI_VERSION}")
+message(STATUS "  jsoncpp    : ${jsoncpp_VERSION}")
 message(STATUS "  openssl    : ${OPENSSL_VERSION}")
-message(STATUS "  asio       : ${ASIO_INCLUDE_DIR} (自带 WebDAV 客户端)")
-message(STATUS "  httplib    : ${HTTPLIB_VERSION} (${HTTPLIB_LIBRARIES})")
-message(STATUS "  postgres   : ${PostgreSQL_VERSION_STRING} (${PostgreSQL_LIBRARIES})")
-message(STATUS "  nlohmann   : (find_package nlohmann_json)")
 message(STATUS "  clang-fmt  : ${CLANG_FORMAT_EXE} (format-on-build=${SB_FORMAT_ON_BUILD})")
 message(STATUS "")
