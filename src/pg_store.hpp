@@ -39,6 +39,23 @@ struct StorageNodeRecord {
   std::string state;
 };
 
+// 一个实体在某个存储节点上的一份位置（下载接口用）
+struct EntityLocation {
+  std::string entity_id;
+  std::string sha256;
+  long long size = 0;
+  std::string mime_type;
+  std::string storage_id;
+  std::string key; // 相对 base_path 的路径
+
+  // 所属存储节点（下载时不再回查 storage_nodes）
+  std::string storage_name;
+  std::string storage_type;
+  std::string storage_endpoint;
+  std::string storage_config_json;
+  std::string storage_state;
+};
+
 // 哈希模式下，一个文件的「库内记录」判定结果
 enum class LocationAction {
   Inserted, // entities 新建 + entity_locations 新建
@@ -89,6 +106,16 @@ public:
   // 也匹配任意深度的 .../s1/f1.txt。纯读，不写任何表。
   Result<bool> location_matches_size(const std::string& storage_id, const std::string& suffix_key,
                                      long long size);
+
+  // 下载用：列出该实体的全部位置（含所属存储节点信息），按 storage 名 + key 排序。
+  // 实体不存在或没有任何 location 时返回空数组（由调用方给 404）。
+  Result<std::vector<EntityLocation>> list_entity_locations(const std::string& entity_id);
+
+  // 下载探测的记账：只动 failed_at，不碰 state / verified_at
+  Status mark_location_ok(const std::string& entity_id, const std::string& storage_id,
+                          const std::string& key);
+  Status mark_location_failed(const std::string& entity_id, const std::string& storage_id,
+                              const std::string& key);
 
 private:
   PgStore() = default;

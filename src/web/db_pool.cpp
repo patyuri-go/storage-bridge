@@ -11,7 +11,7 @@ namespace sb {
 
 thread_local bool t_in_pool_task = false;
 
-Result<std::unique_ptr<DbPool>> DbPool::create(const DbConfig& cfg, int threads) {
+Result<std::shared_ptr<DbPool>> DbPool::create(const DbConfig& cfg, int threads) {
   if (threads < 1) {
     threads = 1;
   }
@@ -27,7 +27,7 @@ Result<std::unique_ptr<DbPool>> DbPool::create(const DbConfig& cfg, int threads)
     stores.push_back(std::move(*store));
   }
 
-  std::unique_ptr<DbPool> self(new DbPool());
+  std::shared_ptr<DbPool> self(new DbPool());
   self->stores_ = std::move(stores);
   self->start();
   LOG_INFO << cat("db pool started: ", std::to_string(threads), " connections");

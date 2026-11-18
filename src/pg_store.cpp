@@ -279,4 +279,64 @@ Result<bool> PgStore::location_matches_size(const std::string& storage_id,
   }
 }
 
+Result<std::vector<EntityLocation>> PgStore::list_entity_locations(const std::string& entity_id) {
+  try {
+    std::vector<EntityLocation> out;
+    EntityLocation loc;
+    soci::indicator mime_ind = soci::i_null;
+    soci::indicator cfg_ind = soci::i_null;
+    soci::statement st =
+        (db_->prepare << "select e.entity_id::text, e.sha256, e.size, e.mime_type, "
+                         "l.storage_id::text, l.key, "
+                         "s.name, s.type, s.endpoint, CAST(s.config AS text), s.state "
+                         "from entities e "
+                         "join entity_locations l on l.entity_id = e.entity_id "
+                         "join storage_nodes s on s.storage_id = l.storage_id "
+                         "where e.entity_id = CAST(:id AS uuid) "
+                         "order by s.name, l.key",
+         soci::into(loc.entity_id), soci::into(loc.sha256), soci::into(loc.size),
+         soci::into(loc.mime_type, mime_ind), soci::into(loc.storage_id), soci::into(loc.key),
+         soci::into(loc.storage_name), soci::into(loc.storage_type), soci::into(loc.storage_endpoint),
+         soci::into(loc.storage_config_json, cfg_ind), soci::into(loc.storage_state),
+         soci::use(entity_id));
+    st.execute(false);
+    while (st.fetch()) {
+      if (mime_ind != soci::i_ok) {
+        loc.mime_type.clear();
+      }
+      if (cfg_ind != soci::i_ok) {
+        loc.storage_config_json = "{}";
+      }
+      out.push_back(loc);
+    }
+    return out;
+  } catch (const soci::soci_error& e) {
+    return translate("查询实体位置失败", e, entity_id);
+  }
+}
+
+Status PgStore::mark_location_ok(const std::string& entity_id, const std::string& storage_id,
+                                 const std::string& key) {
+  try {
+    *db_ << "update entity_locations set failed_at = null "
+            "where entity_id = CAST(:e AS uuid) and storage_id = CAST(:s AS uuid) and key = :k",
+        soci::use(entity_id), soci::use(storage_id), soci::use(key);
+    return {};
+  } catch (const soci::soci_error& e) {
+    return translate("清空 entity_locations.failed_at 失败", e, key);
+  }
+}
+
+Status PgStore::mark_location_failed(const std::string& entity_id, const std::string& storage_id,
+                                     const std::string& key) {
+  try {
+    *db_ << "update entity_locations set failed_at = now() "
+            "where entity_id = CAST(:e AS uuid) and storage_id = CAST(:s AS uuid) and key = :k",
+        soci::use(entity_id), soci::use(storage_id), soci::use(key);
+    return {};
+  } catch (const soci::soci_error& e) {
+    return translate("写入 entity_locations.failed_at 失败", e, key);
+  }
+}
+
 } // namespace sb

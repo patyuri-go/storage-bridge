@@ -2,6 +2,7 @@
 
 #include "result.hpp"
 
+#include <memory>
 #include <string>
 
 namespace sb {
@@ -26,10 +27,11 @@ struct ServerOptions {
 //   POST /api/storages               create=true 新建 / create=false 更新
 //   GET  /api/storages/{id}/files    列目录（?path=/a/b）
 //   POST /api/storages/{id}/scans    入队扫描，202
+//   GET  /api/entities/{id}/content  流式下载文件内容（支持单段 Range）
 //   GET  /api/health                 200 ok / 503 degraded
 //
 // 另外 GET / 会 302 到 /ui/（文件树页面，静态资源来自 web_root）。
-Status serve(const ServerOptions& opts, DbPool& db, JobWorker& jobs);
+Status serve(const ServerOptions& opts, std::shared_ptr<DbPool> db, JobWorker& jobs);
 
 } // namespace web
 } // namespace sb

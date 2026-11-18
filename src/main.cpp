@@ -167,7 +167,7 @@ int main(int argc, char** argv) {
   LOG_INFO << cat("db threads:    ", std::to_string(cfg.server.db_threads));
   LOG_INFO << cat("max queue:     1000");
 
-  if (Status st = web::serve(web_opts, **pool, jobs); !st) {
+  if (Status st = web::serve(web_opts, *pool, jobs); !st) {
     std::cerr << "http 服务失败: " << st.error().to_string() << "\n";
     return 1;
   }

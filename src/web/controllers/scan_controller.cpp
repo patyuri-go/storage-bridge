@@ -119,7 +119,7 @@ void ScanController::create(const drogon::HttpRequestPtr& req,
                  auto ctx = std::make_shared<ScanContext>();
                  ctx->storage = std::shared_ptr<Storage>(std::move(*storage));
                  ctx->storage_id = storage_id;
-                 ctx->db = AppContext::instance().db;
+                 ctx->db = AppContext::instance().db.get();
                  ctx->mode = mode;
 
                  // 先把所有目标都校验/建好，避免提交到一半才发现某个路径非法

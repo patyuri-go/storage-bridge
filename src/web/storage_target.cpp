@@ -122,7 +122,14 @@ Result<StorageTarget> load_storage_target(PgStore& store, const std::string& sto
   if (!node) {
     return node.error();
   }
-  if (node->type != "webdav") {
+  return make_storage_target(node->storage_id, node->name, node->type, node->endpoint,
+                             node->config_json);
+}
+
+Result<StorageTarget> make_storage_target(const std::string& storage_id, const std::string& name,
+                                          const std::string& type, const std::string& endpoint,
+                                          const std::string& config_json) {
+  if (type != "webdav") {
     return err(ErrorCode::InvalidArgument, "目前只支持 type=\"webdav\"", "", storage_id);
   }
 
@@ -130,8 +137,7 @@ Result<StorageTarget> load_storage_target(PgStore& store, const std::string& sto
   std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
   Json::Value cfg;
   std::string errs;
-  if (!reader->parse(node->config_json.data(), node->config_json.data() + node->config_json.size(),
-                     &cfg, &errs)) {
+  if (!reader->parse(config_json.data(), config_json.data() + config_json.size(), &cfg, &errs)) {
     return err(ErrorCode::Internal, "storage.config 不是合法 JSON", trim(errs), storage_id);
   }
   for (const char* key : {"username", "password", "base_path"}) {
@@ -145,12 +151,10 @@ Result<StorageTarget> load_storage_target(PgStore& store, const std::string& sto
     return base_path.error();
   }
 
-  const std::string endpoint = strip_endpoint(node->endpoint);
-
   StorageTarget out;
-  out.name = node->name;
+  out.name = name;
   // webdav 默认走 http://（表里没有 protocol 字段）
-  out.root_url = cat("http://", endpoint);
+  out.root_url = cat("http://", strip_endpoint(endpoint));
   out.base_path = *base_path;
   out.username = cfg["username"].asString();
   out.password = cfg["password"].asString();

@@ -29,7 +29,7 @@ extern thread_local bool t_in_pool_task;
 // 注意：池内任务里不要 submit(...).get()，否则会把池耗尽并死锁。
 class DbPool {
 public:
-  static Result<std::unique_ptr<DbPool>> create(const DbConfig& cfg, int threads);
+  static Result<std::shared_ptr<DbPool>> create(const DbConfig& cfg, int threads);
 
   ~DbPool();
 

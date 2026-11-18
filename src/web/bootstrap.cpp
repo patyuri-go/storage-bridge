@@ -55,6 +55,7 @@ void log_routes(const ServerOptions& opts, bool web_ready) {
   LOG_INFO << "  POST /api/storages                新建 / 更新（body.create）";
   LOG_INFO << "  GET  /api/storages/{id}/files     列目录（?path=/a/b）";
   LOG_INFO << "  POST /api/storages/{id}/scans     入队扫描";
+  LOG_INFO << "  GET  /api/entities/{id}/content   流式下载（支持 Range）";
   LOG_INFO << "  GET  /api/health                  健康检查";
   if (!web_ready) {
     LOG_WARN << cat("web_root 目录不存在: ", opts.web_root);
@@ -63,9 +64,9 @@ void log_routes(const ServerOptions& opts, bool web_ready) {
 
 } // namespace
 
-Status serve(const ServerOptions& opts, DbPool& db, JobWorker& jobs) {
+Status serve(const ServerOptions& opts, std::shared_ptr<DbPool> db, JobWorker& jobs) {
   AppContext& ctx = AppContext::instance();
-  ctx.db = &db;
+  ctx.db = std::move(db);
   ctx.jobs = &jobs;
   ctx.web_root = opts.web_root;
 
