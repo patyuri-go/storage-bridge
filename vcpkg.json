@@ -1,7 +1,7 @@
 {
   "name": "storage-bridge",
   "version-string": "0.1.0",
-  "builtin-baseline": "8f363bdc11359ede4bc51e5eb32a2617538049c8",
+  "builtin-baseline": "320fc5d9fb666ebb1e76a08e63870e87a2063fe9",
   "dependencies": [
     "curl",
     "drogon",
