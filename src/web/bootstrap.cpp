@@ -55,6 +55,7 @@ void log_routes(const ServerOptions& opts, bool web_ready) {
   LOG_INFO << "  POST /api/storages                新建 / 更新（body.create）";
   LOG_INFO << "  GET  /api/storages/{id}/files     列目录（?path=/a/b）";
   LOG_INFO << "  POST /api/storages/{id}/scans     入队扫描";
+  LOG_INFO << "  POST /api/storages/{id}/entities/lookup  路径 -> 实体 id（递归）";
   LOG_INFO << "  GET  /api/entities/{id}/content   流式下载（支持 Range）";
   LOG_INFO << "  GET  /api/health                  健康检查";
   if (!web_ready) {

@@ -67,8 +67,24 @@
         <option value="full">完整扫描</option>
       </select>
     </label>
+    <button id="lookup-button" class="secondary-button" type="button">获取</button>
     <button id="scan-button" class="primary-button" type="button">扫描</button>
     <button id="selection-clear" class="text-button" type="button">清除</button>
+  </div>
+
+  <div class="modal-backdrop" id="lookup-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="lookup-title">
+      <header class="modal-head">
+        <h3 id="lookup-title">实体 id</h3>
+        <button id="lookup-close" class="text-button" type="button" aria-label="关闭">✕</button>
+      </header>
+      <div class="modal-meta" id="lookup-meta"></div>
+      <div class="modal-body" id="lookup-body"></div>
+      <footer class="modal-foot">
+        <span class="modal-note" id="lookup-note"></span>
+        <button id="lookup-copy" class="primary-button" type="button">一键复制</button>
+      </footer>
+    </div>
   </div>
 
   <script src="app.js"></script>

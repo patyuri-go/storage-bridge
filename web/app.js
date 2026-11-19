@@ -16,6 +16,13 @@ const ui = {
   selectionCount: document.getElementById('selection-count'),
   selectionHint: document.getElementById('selection-hint'),
   selectionResult: document.getElementById('selection-result'),
+  lookup: document.getElementById('lookup-button'),
+  lookupModal: document.getElementById('lookup-modal'),
+  lookupMeta: document.getElementById('lookup-meta'),
+  lookupBody: document.getElementById('lookup-body'),
+  lookupClose: document.getElementById('lookup-close'),
+  lookupCopy: document.getElementById('lookup-copy'),
+  lookupNote: document.getElementById('lookup-note'),
   scan: document.getElementById('scan-button'),
   scanMode: document.getElementById('scan-mode'),
   selectionClear: document.getElementById('selection-clear'),
@@ -28,6 +35,8 @@ const state = {
   selected: null, // 详情面板当前展示的节点
   selection: new Set(), // Ctrl/⌘ 多选集合
   scanning: false,
+  lookingUp: false,
+  lookupIds: [], // 弹窗里待复制的实体 id
   mode: 'verify', // 扫描的 mode：verify = 校验模式，full = 完整扫描
 };
 
@@ -574,6 +583,146 @@ async function runScan() {
   }
 }
 
+// 选中的目录/文件路径去重后交给后端递归遍历（后端还会再做嵌套去重）
+function selectedPaths() {
+  return [...new Set([...state.selection].map((node) => node._entry.relPath || '/'))];
+}
+
+async function runLookup() {
+  if (state.lookingUp || !state.selection.size) {
+    return;
+  }
+
+  const paths = selectedPaths();
+  state.lookingUp = true;
+  ui.lookup.disabled = true;
+  ui.lookup.textContent = '获取中…';
+  setScanResult(`正在获取 ${paths.length} 条路径的实体 id…`);
+
+  try {
+    const data = await apiPost(storagePath(state.currentId, '/entities/lookup'), { paths });
+    setScanResult('');
+    showLookupResult(data, paths.length);
+  } catch (error) {
+    setScanResult(`获取失败：${error.message}`, { error: true });
+  } finally {
+    state.lookingUp = false;
+    ui.lookup.disabled = false;
+    ui.lookup.textContent = '获取';
+  }
+}
+
+function showLookupResult(data, pathCount) {
+  const files = Array.isArray(data && data.files) ? data.files : [];
+  const errors = Array.isArray(data && data.errors) ? data.errors : [];
+  const scanned = Number(data && data.scanned) || 0;
+  const missing = Number(data && data.missing) || 0;
+
+  const meta = [`选了 ${pathCount} 条路径`, `扫到 ${scanned} 个文件`, `命中 ${files.length} 个实体`];
+  if (missing > 0) {
+    meta.push(`${missing} 个文件没有实体记录`);
+  }
+  if (data && data.truncated) {
+    meta.push('遍历超时，结果不完整');
+  }
+  if (errors.length) {
+    meta.push(`${Number(data && data.error_count) || errors.length} 条路径读取失败`);
+  }
+  ui.lookupMeta.textContent = meta.join(' · ');
+
+  ui.lookupBody.replaceChildren();
+  if (!files.length) {
+    const empty = document.createElement('div');
+    empty.className = 'lookup-empty';
+    empty.textContent = '没有找到对应的实体 id。';
+    ui.lookupBody.append(empty);
+  } else {
+    for (const item of files) {
+      const row = document.createElement('div');
+      row.className = 'lookup-row';
+
+      const path = document.createElement('span');
+      path.className = 'lookup-path';
+      path.textContent = item.rel_path;
+      path.title = item.rel_path;
+
+      const id = document.createElement('code');
+      id.className = 'lookup-id';
+      id.textContent = item.entity_id;
+
+      row.append(path, id);
+      ui.lookupBody.append(row);
+    }
+  }
+
+  if (errors.length) {
+    const box = document.createElement('div');
+    box.className = 'lookup-errors';
+
+    const title = document.createElement('div');
+    title.className = 'lookup-errors-title';
+    title.textContent = '读取失败的路径';
+    box.append(title);
+
+    for (const item of errors) {
+      const line = document.createElement('div');
+      line.className = 'lookup-error';
+      line.textContent = `${item.rel_path}：${item.message}`;
+      box.append(line);
+    }
+    ui.lookupBody.append(box);
+  }
+
+  state.lookupIds = [...new Set(files.map((item) => item.entity_id))];
+  ui.lookupCopy.disabled = state.lookupIds.length === 0;
+  ui.lookupNote.textContent = '';
+  ui.lookupNote.classList.remove('error');
+  ui.lookupModal.hidden = false;
+  ui.lookupClose.focus();
+}
+
+function closeLookup() {
+  ui.lookupModal.hidden = true;
+  state.lookupIds = [];
+}
+
+// http:// 下 navigator.clipboard 不可用，退回到隐藏 textarea + execCommand
+async function writeClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {
+      // 继续走兜底方案
+    }
+  }
+  try {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.top = '-1000px';
+    document.body.append(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    area.remove();
+    return ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function copyLookupIds() {
+  if (!state.lookupIds.length) {
+    return;
+  }
+  const ok = await writeClipboard(state.lookupIds.join('\n'));
+  ui.lookupNote.textContent = ok
+    ? `已复制 ${state.lookupIds.length} 个实体 id`
+    : '复制失败，请手动选择复制';
+  ui.lookupNote.classList.toggle('error', !ok);
+}
+
 ui.tree.addEventListener('click', (event) => {
   const row = event.target.closest('.node-row');
   if (!row || !ui.tree.contains(row)) {
@@ -630,5 +779,35 @@ ui.selectionClear.addEventListener('click', () => {
   clearSelection();
   showEmpty();
 });
+
+ui.lookup.addEventListener('click', () => {
+  runLookup();
+});
+
+ui.lookupClose.addEventListener('click', () => {
+  closeLookup();
+});
+
+ui.lookupCopy.addEventListener('click', () => {
+  copyLookupIds();
+});
+
+ui.lookupModal.addEventListener('click', (event) => {
+  if (event.target === ui.lookupModal) {
+    closeLookup();
+  }
+});
+
+document.addEventListener(
+  'keydown',
+  (event) => {
+    if (event.key === 'Escape' && !ui.lookupModal.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeLookup();
+    }
+  },
+  true,
+);
 
 refreshStorages();

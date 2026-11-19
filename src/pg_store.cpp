@@ -2,10 +2,13 @@
 
 #include "util.hpp"
 
+#include <json/json.h>
+
 #include <soci/postgresql/soci-postgresql.h>
 #include <soci/soci.h>
 #include <trantor/utils/Logger.h>
 
+#include <algorithm>
 #include <string>
 
 namespace sb {
@@ -312,6 +315,44 @@ Result<std::vector<EntityLocation>> PgStore::list_entity_locations(const std::st
     return out;
   } catch (const soci::soci_error& e) {
     return translate("查询实体位置失败", e, entity_id);
+  }
+}
+
+Result<std::map<std::string, std::string>> PgStore::lookup_locations(
+    const std::string& storage_id, const std::vector<std::string>& keys) {
+  std::map<std::string, std::string> out;
+  if (keys.empty()) {
+    return out;
+  }
+
+  constexpr std::size_t kBatch = 500;
+  try {
+    Json::StreamWriterBuilder builder;
+    builder["indentation"] = "";
+    for (std::size_t begin = 0; begin < keys.size(); begin += kBatch) {
+      const std::size_t end = std::min(keys.size(), begin + kBatch);
+      Json::Value arr(Json::arrayValue);
+      for (std::size_t i = begin; i < end; ++i) {
+        arr.append(keys[i]);
+      }
+      const std::string json = Json::writeString(builder, arr);
+
+      // jsonb 数组展开后走 IN，一条语句处理一批；key 里的引号/换行由 JSON 负责转义
+      std::string key;
+      std::string entity_id;
+      soci::statement st =
+          (db_->prepare << "select key, entity_id::text from entity_locations "
+                          "where storage_id = CAST(:s AS uuid) "
+                          "and key in (select jsonb_array_elements_text(CAST(:ks AS jsonb)))",
+           soci::into(key), soci::into(entity_id), soci::use(storage_id), soci::use(json));
+      st.execute(false);
+      while (st.fetch()) {
+        out.emplace(key, entity_id);
+      }
+    }
+    return out;
+  } catch (const soci::soci_error& e) {
+    return translate("批量查询实体位置失败", e, storage_id);
   }
 }
 

@@ -6,6 +6,7 @@
 #include "util.hpp"
 #include "web/app_context.hpp"
 #include "web/db_pool.hpp"
+#include "web/entity_lookup.hpp"
 #include "web/json_util.hpp"
 #include "web/storage_target.hpp"
 
@@ -16,6 +17,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -261,6 +263,61 @@ std::size_t fill_stream(char* buf, std::size_t len, const std::shared_ptr<Stream
   return *got;
 }
 
+// 路径数组：必须是非空字符串数组；元素 trim 后规范化，空串拒绝。
+// 规范化后去重，并把被父路径包含的项丢掉（/a 吸收 /a/b，但不吸收 /ab）。
+Result<std::vector<std::string>> parse_lookup_paths(const Json::Value& body) {
+  const char* kContext = "POST /api/storages/{id}/entities/lookup";
+  if (!body.isObject() || !body.isMember("paths") || !body["paths"].isArray()) {
+    return err(ErrorCode::InvalidArgument, "params.paths 必须是字符串数组", "", kContext);
+  }
+  const Json::Value& arr = body["paths"];
+  if (arr.empty()) {
+    return err(ErrorCode::InvalidArgument, "params.paths 不能为空数组", "", kContext);
+  }
+
+  std::vector<std::string> paths;
+  for (Json::ArrayIndex i = 0; i < arr.size(); ++i) {
+    if (!arr[i].isString()) {
+      return err(ErrorCode::InvalidArgument, "params.paths 必须是字符串数组", "", kContext);
+    }
+    const std::string raw = trim(arr[i].asString());
+    if (raw.empty()) {
+      return err(ErrorCode::InvalidArgument,
+                 cat("params.paths[", std::to_string(i), "] 不能是空字符串"), "", kContext);
+    }
+    auto rel = normalize_rel_path(raw);
+    if (!rel) {
+      return rel.error();
+    }
+    paths.push_back(*rel);
+  }
+
+  std::sort(paths.begin(), paths.end(), [](const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) {
+      return a.size() < b.size();
+    }
+    return a < b;
+  });
+
+  std::vector<std::string> kept;
+  for (const auto& path : paths) {
+    bool covered = false;
+    for (const auto& k : kept) {
+      if (k == "/" || path == k ||
+          (path.size() > k.size() && path.compare(0, k.size(), k) == 0 &&
+           path[k.size()] == '/')) {
+        covered = true;
+        break;
+      }
+    }
+    if (!covered) {
+      kept.push_back(path);
+    }
+  }
+  std::sort(kept.begin(), kept.end());
+  return kept;
+}
+
 } // namespace
 
 void EntityController::content(const drogon::HttpRequestPtr& req,
@@ -404,6 +461,127 @@ void EntityController::content(const drogon::HttpRequestPtr& req,
     }
     drogon::app().getLoop()->queueInLoop([respond, resp]() { respond(resp); });
   });
+}
+
+void EntityController::lookup(const drogon::HttpRequestPtr& req,
+                              std::function<void(const drogon::HttpResponsePtr&)>&& callback,
+                              std::string storage_id) {
+  storage_id = trim(storage_id);
+  if (!is_uuid(storage_id)) {
+    callback(error_response(err(ErrorCode::InvalidArgument, "storage_id 不是合法 UUID", "",
+                                cat("POST /api/storages/", storage_id, "/entities/lookup"))));
+    return;
+  }
+
+  auto parsed = parse_json_body(req);
+  if (!parsed) {
+    callback(error_response(parsed.error()));
+    return;
+  }
+  auto paths = parse_lookup_paths(*parsed);
+  if (!paths) {
+    callback(error_response(paths.error()));
+    return;
+  }
+
+  HttpCallback respond = std::move(callback);
+  const std::shared_ptr<DbPool> pool = AppContext::instance().db;
+  const std::string context = cat("POST /api/storages/", storage_id, "/entities/lookup");
+
+  try {
+    std::thread([respond, pool, storage_id, paths = *paths, context]() mutable {
+      auto send = [respond](drogon::HttpResponsePtr resp) {
+        drogon::app().getLoop()->queueInLoop([respond, resp]() { respond(resp); });
+      };
+
+      // 遍历是远端 IO，不占 DbPool 线程；只有查库的两小段走池
+      Result<StorageTarget> target = err(ErrorCode::Internal, "加载存储配置失败");
+      try {
+        target = pool->submit([storage_id](PgStore& db) {
+          return load_storage_target(db, storage_id);
+        }).get();
+      } catch (const std::exception& e) {
+        send(error_response(err(ErrorCode::Internal, "请求处理异常", e.what(), context)));
+        return;
+      }
+      if (!target) {
+        send(error_response(target.error()));
+        return;
+      }
+
+      const LookupWalk walk = walk_storage_paths(*target, paths);
+      if (!walk.any_input_ok) {
+        std::string detail;
+        for (const auto& item : walk.errors) {
+          if (!detail.empty()) {
+            detail += "; ";
+          }
+          detail += cat(item.first, ": ", item.second);
+        }
+        if (detail.empty()) {
+          detail = "没有可访问的路径";
+        }
+        send(error_response(err(ErrorCode::Storage, "所有路径都无法访问", detail, context)));
+        return;
+      }
+
+      Result<std::map<std::string, std::string>> hits =
+          err(ErrorCode::Internal, "查询实体位置失败");
+      try {
+        hits = pool->submit([storage_id, files = walk.files](PgStore& db) {
+          return db.lookup_locations(storage_id, files);
+        }).get();
+      } catch (const std::exception& e) {
+        send(error_response(err(ErrorCode::Internal, "请求处理异常", e.what(), context)));
+        return;
+      }
+      if (!hits) {
+        send(error_response(hits.error()));
+        return;
+      }
+
+      Json::Value body(Json::objectValue);
+      body["storage_id"] = storage_id;
+
+      Json::Value files(Json::arrayValue);
+      std::size_t matched = 0;
+      for (const auto& rel : walk.files) {
+        const auto it = hits->find(rel);
+        if (it == hits->end()) {
+          continue;
+        }
+        Json::Value item(Json::objectValue);
+        item["rel_path"] = rel;
+        item["entity_id"] = it->second;
+        files.append(item);
+        ++matched;
+      }
+
+      Json::Value errors(Json::arrayValue);
+      for (const auto& item : walk.errors) {
+        Json::Value e(Json::objectValue);
+        e["rel_path"] = item.first;
+        e["message"] = item.second;
+        errors.append(e);
+      }
+
+      body["files"] = files;
+      body["scanned"] = static_cast<Json::UInt64>(walk.files.size());
+      body["missing"] = static_cast<Json::UInt64>(walk.files.size() - matched);
+      body["truncated"] = walk.truncated;
+      body["error_count"] = static_cast<Json::UInt64>(walk.error_count);
+      body["errors"] = errors;
+
+      LOG_INFO << cat("lookup ", storage_id, ": paths=", std::to_string(paths.size()),
+                      " scanned=", std::to_string(walk.files.size()),
+                      " missing=", std::to_string(walk.files.size() - matched),
+                      " errors=", std::to_string(walk.error_count),
+                      walk.truncated ? " truncated" : "");
+      send(json_response(drogon::k200OK, body));
+    }).detach();
+  } catch (const std::exception& e) {
+    respond(error_response(err(ErrorCode::Internal, "请求处理异常", e.what(), context)));
+  }
 }
 
 } // namespace sb::web

@@ -3,6 +3,7 @@
 #include "config.hpp"
 #include "result.hpp"
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -110,6 +111,11 @@ public:
   // 下载用：列出该实体的全部位置（含所属存储节点信息），按 storage 名 + key 排序。
   // 实体不存在或没有任何 location 时返回空数组（由调用方给 404）。
   Result<std::vector<EntityLocation>> list_entity_locations(const std::string& entity_id);
+
+  // 批量判定「这些 key 在该存储上是否已有实体」：返回 key -> entity_id。
+  // 内部按 500 个一批发 IN 查询；不关心 location 的 state / failed_at。
+  Result<std::map<std::string, std::string>> lookup_locations(
+      const std::string& storage_id, const std::vector<std::string>& keys);
 
   // 下载探测的记账：只动 failed_at，不碰 state / verified_at
   Status mark_location_ok(const std::string& entity_id, const std::string& storage_id,

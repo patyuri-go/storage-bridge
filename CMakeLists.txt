@@ -45,6 +45,7 @@ add_library(storage_bridge_core STATIC
   src/pg_store.cpp
   src/web/app_context.cpp
   src/web/db_pool.cpp
+  src/web/entity_lookup.cpp
   src/web/json_util.cpp
   src/web/storage_target.cpp)
 target_include_directories(storage_bridge_core PUBLIC src)
