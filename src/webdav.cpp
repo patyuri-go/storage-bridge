@@ -407,10 +407,13 @@ struct StreamState {
   std::string buffer;
   std::map<std::string, std::string> headers;
   int status = 0;
+  bool headers_complete = false; // 当前响应头已收到空行
   bool done = false;
   bool failed = false;
 
-  ~StreamState() { shutdown(); }
+  ~StreamState() {
+    shutdown();
+  }
 
   void shutdown() {
     if (multi != nullptr && easy != nullptr) {
@@ -447,12 +450,19 @@ std::size_t streamHeader(char* ptr, std::size_t size, std::size_t nmemb, void* u
     line.pop_back();
   }
   if (line.rfind("HTTP/", 0) == 0) {
-    // "HTTP/1.1 206 Partial Content"
+    // "HTTP/1.1 206 Partial Content"；重定向/认证重试会出现多行状态行
     state->headers.clear();
+    // 中间响应的 body（若有）属于重定向前那一跳，不能混进最终文件字节
+    state->buffer.clear();
+    state->headers_complete = false;
     const std::size_t first = line.find(' ');
     if (first != std::string::npos) {
       state->status = static_cast<int>(std::strtol(line.c_str() + first + 1, nullptr, 10));
     }
+    return len;
+  }
+  if (line.empty()) {
+    state->headers_complete = true;
     return len;
   }
   absorbHeaderLine(state->headers, ptr, len);
@@ -492,18 +502,24 @@ Stream openStream(const Url& base, const std::string& path, const std::vector<st
     return Stream{};
   }
 
-  // 先推进到拿到响应头（status 已知）为止，之后由 read() 按需继续拉取
-  while (state->status == 0 && !state->done) {
+  // 先推进到拿到「最终响应」为止。libcurl 会在同一个 transfer 内自己跟随 3xx，
+  // 中间响应（1xx/3xx/401/407）的头不能当成结果返回，否则 Reader 会把 302 当失败。
+  auto is_final = [](int status) {
+    const int cls = status / 100;
+    return status != 0 && cls != 1 && cls != 3 && status != 401 && status != 407;
+  };
+  while (!state->done && !(is_final(state->status) && state->headers_complete)) {
     int running = 0;
     if (curl_multi_perform(state->multi, &running) != CURLM_OK) {
       state->failed = true;
       break;
     }
     if (running == 0) {
+      // transfer 真正结束：可能是最终响应，也可能是无法跟随的 3xx/认证失败
       state->done = true;
       break;
     }
-    if (state->status != 0) {
+    if (is_final(state->status) && state->headers_complete) {
       break;
     }
     int numfds = 0;
