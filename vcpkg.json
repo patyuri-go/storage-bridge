@@ -5,6 +5,7 @@
   "dependencies": [
     "curl",
     "drogon",
+    "gtest",
     "jsoncpp",
     "libpq",
     "openssl",

@@ -4,6 +4,7 @@
 #include "scan_job.hpp"
 #include "storage.hpp"
 #include "util.hpp"
+#include "web/app_context.hpp"
 #include "web/json_util.hpp"
 #include "web/storage_target.hpp"
 
@@ -36,7 +37,7 @@ void FileController::list(const drogon::HttpRequestPtr& req,
     return;
   }
 
-  submit_reply(callback, [storage_id, req_path, rel = *rel_path](PgStore& db) -> Result<Reply> {
+  submit_reply(callback, [storage_id, req_path, rel = *rel_path](IDatabase& db) -> Result<Reply> {
     auto target = load_storage_target(db, storage_id);
     if (!target) {
       return target.error();
@@ -48,7 +49,7 @@ void FileController::list(const drogon::HttpRequestPtr& req,
     }
     const std::string url = cat(target->root_url, *joined);
 
-    auto storage = Storage::create(storage_options_for(*target));
+    auto storage = Storage::create(storage_options_for(*target), AppContext::instance().webdav);
     if (!storage) {
       return storage.error();
     }

@@ -108,7 +108,7 @@ Status ScanFileJob::run(JobWorker& worker) {
     }
     const std::string probe = two_level_key(key_);
     if (!probe.empty() && size > 0) {
-      auto matched = ctx_->db->submit([this, &probe, size](PgStore& db) {
+      auto matched = ctx_->db->submit([this, &probe, size](IDatabase& db) {
         return db.location_matches_size(ctx_->storage_id, probe, static_cast<long long>(size));
       }).get();
       if (!matched) {
@@ -159,7 +159,7 @@ Status ScanFileJob::run(JobWorker& worker) {
     return {};
   }
 
-  auto outcome = ctx_->db->submit([this, &hex, total](PgStore& db) {
+  auto outcome = ctx_->db->submit([this, &hex, total](IDatabase& db) {
     return db.record_file(ctx_->storage_id, key_, *hex, static_cast<long long>(total),
                           mime_type_for(key_));
   }).get();

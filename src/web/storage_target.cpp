@@ -117,7 +117,7 @@ Error map_conflict(Error e) {
   return e;
 }
 
-Result<StorageTarget> load_storage_target(PgStore& store, const std::string& storage_id) {
+Result<StorageTarget> load_storage_target(IDatabase& store, const std::string& storage_id) {
   auto node = store.get_storage(storage_id);
   if (!node) {
     return node.error();

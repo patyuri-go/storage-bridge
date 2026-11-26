@@ -5,6 +5,7 @@
 #include "web/app_context.hpp"
 #include "web/db_pool.hpp"
 #include "web/json_util.hpp"
+#include "webdav.hpp"
 
 #include <drogon/drogon.h>
 #include <json/json.h>
@@ -70,6 +71,9 @@ Status serve(const ServerOptions& opts, std::shared_ptr<DbPool> db, JobWorker& j
   ctx.db = std::move(db);
   ctx.jobs = &jobs;
   ctx.web_root = opts.web_root;
+  if (!ctx.webdav) {
+    ctx.webdav = std::make_shared<webdav::CurlWebDavClient>();
+  }
 
   std::error_code ec;
   const bool web_ready =
@@ -144,6 +148,12 @@ Status serve(const ServerOptions& opts, std::shared_ptr<DbPool> db, JobWorker& j
   };
   app.setIntSignalHandler(on_signal);
   app.setTermSignalHandler(on_signal);
+  if (!opts.install_signal_handlers) {
+    // 测试里不装 SIGINT/SIGTERM handler：Drogon 的 handler 只 quit 事件循环，
+    // 不会结束测试进程，CTest 超时时会挂住。
+    app.setIntSignalHandler(nullptr);
+    app.setTermSignalHandler(nullptr);
+  }
   std::signal(SIGPIPE, SIG_IGN);
 
   log_routes(opts, web_ready);

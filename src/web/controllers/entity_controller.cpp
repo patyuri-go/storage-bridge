@@ -154,7 +154,7 @@ void probe_location(const std::shared_ptr<RaceState>& state, const std::shared_p
   if (!target) {
     failure = target.error();
   } else {
-    auto storage = Storage::create(storage_options_for(*target));
+    auto storage = Storage::create(storage_options_for(*target), AppContext::instance().webdav);
     if (!storage) {
       failure = storage.error();
     } else {
@@ -203,7 +203,7 @@ void probe_location(const std::shared_ptr<RaceState>& state, const std::shared_p
 
   // 记账：探测线程不在池内，可以 submit
   try {
-    pool->submit([loc, ok](PgStore& db) {
+    pool->submit([loc, ok](IDatabase& db) {
       Status st = ok ? db.mark_location_ok(loc.entity_id, loc.storage_id, loc.key)
                      : db.mark_location_failed(loc.entity_id, loc.storage_id, loc.key);
       if (!st) {
@@ -334,7 +334,7 @@ void EntityController::content(const drogon::HttpRequestPtr& req,
   const std::string range_header = req->getHeader("range");
   const std::shared_ptr<DbPool> pool = AppContext::instance().db;
 
-  pool->submit([respond, entity_id, range_header, req, pool](PgStore& db) mutable {
+  pool->submit([respond, entity_id, range_header, req, pool](IDatabase& db) mutable {
     drogon::HttpResponsePtr resp;
     try {
       auto locations = db.list_entity_locations(entity_id);
@@ -497,7 +497,7 @@ void EntityController::lookup(const drogon::HttpRequestPtr& req,
       // 遍历是远端 IO，不占 DbPool 线程；只有查库的两小段走池
       Result<StorageTarget> target = err(ErrorCode::Internal, "加载存储配置失败");
       try {
-        target = pool->submit([storage_id](PgStore& db) {
+        target = pool->submit([storage_id](IDatabase& db) {
           return load_storage_target(db, storage_id);
         }).get();
       } catch (const std::exception& e) {
@@ -528,7 +528,7 @@ void EntityController::lookup(const drogon::HttpRequestPtr& req,
       Result<std::map<std::string, std::string>> hits =
           err(ErrorCode::Internal, "查询实体位置失败");
       try {
-        hits = pool->submit([storage_id, files = walk.files](PgStore& db) {
+        hits = pool->submit([storage_id, files = walk.files](IDatabase& db) {
           return db.lookup_locations(storage_id, files);
         }).get();
       } catch (const std::exception& e) {

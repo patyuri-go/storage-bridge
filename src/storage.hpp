@@ -22,7 +22,8 @@ struct StorageOptions {
 // 本类线程安全：每次请求独立连接，不持有跨请求状态。
 class Storage {
 public:
-  static Result<std::unique_ptr<Storage>> create(const StorageOptions& opts);
+  static Result<std::unique_ptr<Storage>>
+  create(const StorageOptions& opts, std::shared_ptr<webdav::IWebDavClient> client = nullptr);
 
   ~Storage();
 
@@ -43,6 +44,7 @@ private:
   Result<webdav::Url> webdav_base(const std::string& uri) const;
 
   StorageOptions opts_;
+  std::shared_ptr<webdav::IWebDavClient> client_;
 };
 
 // 单个对象的读取器：一个线程、一个对象、一个实例（非线程安全）。
@@ -68,6 +70,7 @@ private:
   webdav::Url base_;
   std::string path_;
   webdav::ClientOptions opts_;
+  std::shared_ptr<webdav::IWebDavClient> client_;
   webdav::Stream stream_;
   std::int64_t pos_ = 0;  // stream_ 当前位置
   std::int64_t skip_ = 0; // 服务器忽略 Range 时要丢弃的前导字节数

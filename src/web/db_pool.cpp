@@ -17,7 +17,7 @@ Result<std::shared_ptr<DbPool>> DbPool::create(const DbConfig& cfg, int threads)
   }
 
   // 先建满所有连接再启动线程：任何一条连不上都在监听端口前失败
-  std::vector<std::unique_ptr<PgStore>> stores;
+  std::vector<std::unique_ptr<IDatabase>> stores;
   stores.reserve(static_cast<std::size_t>(threads));
   for (int i = 0; i < threads; ++i) {
     auto store = PgStore::connect(cfg);
@@ -34,6 +34,19 @@ Result<std::shared_ptr<DbPool>> DbPool::create(const DbConfig& cfg, int threads)
   return self;
 }
 
+Result<std::shared_ptr<DbPool>> DbPool::create_with_stores(
+    std::vector<std::unique_ptr<IDatabase>> stores) {
+  if (stores.empty()) {
+    return err(ErrorCode::Internal, "DbPool 至少需要一个连接");
+  }
+  std::shared_ptr<DbPool> self(new DbPool());
+  const std::size_t count = stores.size();
+  self->stores_ = std::move(stores);
+  self->start();
+  LOG_INFO << cat("db pool started: ", std::to_string(count), " injected connections");
+  return self;
+}
+
 DbPool::~DbPool() { stop(); }
 
 void DbPool::start() {
@@ -43,7 +56,7 @@ void DbPool::start() {
   }
 }
 
-bool DbPool::enqueue(std::function<void(PgStore&)> task) {
+bool DbPool::enqueue(std::function<void(IDatabase&)> task) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (stopping_) {
@@ -76,7 +89,7 @@ void DbPool::stop() {
 void DbPool::worker_main(std::size_t index) {
   t_in_pool_task = true;
   for (;;) {
-    std::function<void(PgStore&)> task;
+    std::function<void(IDatabase&)> task;
     {
       std::unique_lock<std::mutex> lock(mu_);
       cv_.wait(lock, [this] { return stopping_ || !queue_.empty(); });

@@ -16,9 +16,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ----------------------------------------------------------------------------- formatting
-# LazyVim 保存时用 clangd/clang-format 自动格式化；这里在每次编译前也跑一遍，
-# 保证“编辑器格式 == 编译产物格式”，避免来回抖动。
-option(SB_FORMAT_ON_BUILD "运行 clang-format 后再编译（需要 clang-format）" ON)
+# 手动格式化：cmake --build build --target format
 find_program(CLANG_FORMAT_EXE NAMES clang-format clang-format-18 clang-format-17)
 
 # ----------------------------------------------------------------------------- dependencies
@@ -31,6 +29,7 @@ find_package(SOCI CONFIG REQUIRED COMPONENTS PostgreSQL) # 远端 entity 库
 find_package(jsoncpp CONFIG REQUIRED)         # 配置 / REST 载荷
 find_package(OpenSSL REQUIRED)                # 流式 SHA-256 + TLS 后端
 find_package(Threads REQUIRED)
+find_package(GTest CONFIG REQUIRED)           # gtest + gmock（测试目标）
 
 # ----------------------------------------------------------------------------- target
 add_library(storage_bridge_core STATIC
@@ -79,20 +78,19 @@ if(CLANG_FORMAT_EXE)
     COMMAND ${CLANG_FORMAT_EXE} -i ${SB_FORMAT_SOURCES}
     COMMENT "clang-format -i src/*.{cpp,hpp}"
     VERBATIM)
-  if(SB_FORMAT_ON_BUILD)
-    # 无输出文件的自定义 target 每次构建都会执行；作为 core 的依赖 → 先格式化再编译
-    add_custom_target(format_before_build
-      COMMAND ${CLANG_FORMAT_EXE} -i ${SB_FORMAT_SOURCES}
-      COMMENT "clang-format (pre-build)"
-      VERBATIM)
-    add_dependencies(storage_bridge_core format_before_build)
-    add_dependencies(storage-bridge format_before_build)
-  endif()
 else()
   message(WARNING "clang-format not found: 跳过编译前格式化（apt-get install clang-format）")
 endif()
 
 install(TARGETS storage-bridge RUNTIME DESTINATION bin)
+
+# ----------------------------------------------------------------------------- tests
+option(SB_BUILD_TESTS "构建 gtest/gmock 测试" ON)
+if(SB_BUILD_TESTS)
+  enable_testing()
+  include(GoogleTest)
+  add_subdirectory(test)
+endif()
 
 message(STATUS "")
 message(STATUS "storage-bridge ${PROJECT_VERSION} (vcpkg manifest)")
@@ -101,5 +99,7 @@ message(STATUS "  curl       : ${CURL_VERSION_STRING}")
 message(STATUS "  soci       : ${SOCI_VERSION}")
 message(STATUS "  jsoncpp    : ${jsoncpp_VERSION}")
 message(STATUS "  openssl    : ${OPENSSL_VERSION}")
-message(STATUS "  clang-fmt  : ${CLANG_FORMAT_EXE} (format-on-build=${SB_FORMAT_ON_BUILD})")
+message(STATUS "  gtest      : ${GTest_VERSION}")
+message(STATUS "  clang-fmt  : ${CLANG_FORMAT_EXE} (手动 target: format)")
+message(STATUS "  tests      : ${SB_BUILD_TESTS}")
 message(STATUS "")

@@ -7,7 +7,7 @@
 
 namespace sb {
 
-class PgStore;
+class IDatabase;
 
 namespace web {
 
@@ -35,7 +35,7 @@ struct StorageTarget {
   std::string password;
 };
 
-Result<StorageTarget> load_storage_target(PgStore& store, const std::string& storage_id);
+Result<StorageTarget> load_storage_target(IDatabase& store, const std::string& storage_id);
 // 已经拿到 storage_nodes 各字段时直接构造（下载竞速用，避免再查一次库）
 Result<StorageTarget> make_storage_target(const std::string& storage_id, const std::string& name,
                                           const std::string& type, const std::string& endpoint,

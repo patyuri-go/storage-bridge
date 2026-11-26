@@ -17,6 +17,8 @@ struct ServerOptions {
   int port = 8080;
   // 静态页面目录；挂到 /ui，GET / 会跳转过去
   std::string web_root = "web";
+  // 测试进程内服务时关闭，避免 CTest 的超时信号只退出服务不退出进程。
+  bool install_signal_handlers = true;
 };
 
 // 启动 HTTP 服务（阻塞，直到 app().quit()）。

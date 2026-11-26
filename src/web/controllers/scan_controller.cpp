@@ -105,13 +105,13 @@ void ScanController::create(const drogon::HttpRequestPtr& req,
 
   submit_reply(callback,
                [storage_id, files = std::move(*files), folders = std::move(*folders), mode,
-                jobs](PgStore& db) -> Result<Reply> {
+                jobs](IDatabase& db) -> Result<Reply> {
                  auto target = load_storage_target(db, storage_id);
                  if (!target) {
                    return target.error();
                  }
 
-                 auto storage = Storage::create(storage_options_for(*target));
+                 auto storage = Storage::create(storage_options_for(*target), AppContext::instance().webdav);
                  if (!storage) {
                    return storage.error();
                  }

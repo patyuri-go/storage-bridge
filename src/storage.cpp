@@ -36,9 +36,11 @@ bool same_path(const std::string& lhs, const std::string& rhs) {
 
 } // namespace
 
-Result<std::unique_ptr<Storage>> Storage::create(const StorageOptions& opts) {
+Result<std::unique_ptr<Storage>> Storage::create(const StorageOptions& opts,
+                                                  std::shared_ptr<webdav::IWebDavClient> client) {
   std::unique_ptr<Storage> self(new Storage());
   self->opts_ = opts;
+  self->client_ = client ? std::move(client) : std::make_shared<webdav::CurlWebDavClient>();
   return self;
 }
 
@@ -74,8 +76,7 @@ Result<ObjectRef> Storage::stat(const std::string& uri) {
     return url.error();
   }
 
-  webdav::Client client(*url, webdav_options());
-  const webdav::Response resp = client.propfind(url->path, 0);
+  const webdav::Response resp = client_->propfind(*url, url->path, 0, webdav_options());
   if (resp.status != 207) {
     return err(ErrorCode::Storage, "stat 失败", cat("HTTP ", std::to_string(resp.status)),
                redact_uri(uri));
@@ -115,8 +116,7 @@ Status Storage::list(const std::string& base, const std::function<Status(const O
     path.push_back('/');
   }
 
-  webdav::Client client(*url, webdav_options());
-  const webdav::Response resp = client.propfind(path, 1);
+  const webdav::Response resp = client_->propfind(*url, path, 1, webdav_options());
   if (resp.status != 207) {
     return err(ErrorCode::Storage, "列目录失败", cat("HTTP ", std::to_string(resp.status)),
                redact_uri(base));
@@ -151,6 +151,7 @@ Result<std::unique_ptr<Reader>> Reader::open(Storage& storage, const std::string
   self->base_ = *url;
   self->path_ = url->path;
   self->opts_ = storage.webdav_options();
+  self->client_ = storage.client_;
   self->uri_ = normalize_uri(uri);
 
   auto info = storage.stat(uri);
@@ -176,7 +177,7 @@ Status Reader::open_stream(std::int64_t offset) {
     extra.push_back(cat("Range: bytes=", std::to_string(offset), "-"));
   }
 
-  stream_ = webdav::openStream(base_, path_, extra, opts_);
+  stream_ = client_->open_stream(base_, path_, extra, opts_);
   if (stream_.status == 0) {
     return err(ErrorCode::Network, "下载请求失败（无法连接或不完整响应）", "", redact_uri(uri_));
   }

@@ -95,6 +95,33 @@ private:
   ClientOptions opts_;
 };
 
+// WebDAV 传输层抽象：生产实现走 libcurl，测试可注入 gMock。
+class IWebDavClient {
+public:
+  virtual ~IWebDavClient() = default;
+
+  virtual Response propfind(const Url& base, const std::string& path, int depth,
+                            const ClientOptions& opts) = 0;
+  virtual Stream open_stream(const Url& base, const std::string& path,
+                             const std::vector<std::string>& extra,
+                             const ClientOptions& opts) = 0;
+};
+
+// 默认实现：直接调用本文件的 Client / openStream。
+class CurlWebDavClient final : public IWebDavClient {
+public:
+  Response propfind(const Url& base, const std::string& path, int depth,
+                    const ClientOptions& opts) override {
+    return Client(base, opts).propfind(path, depth);
+  }
+
+  Stream open_stream(const Url& base, const std::string& path,
+                     const std::vector<std::string>& extra,
+                     const ClientOptions& opts) override {
+    return openStream(base, path, extra, opts);
+  }
+};
+
 struct Resource {
   std::string path; // 服务器绝对路径，保持百分号编码，可直接用于 Client 请求
   bool collection = false;

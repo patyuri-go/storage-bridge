@@ -68,7 +68,7 @@ Json::Value compact(const Json::Value& v) {
 
 void StorageController::list(const drogon::HttpRequestPtr&,
                              std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
-  submit_reply(callback, [](PgStore& db) -> Result<Reply> {
+  submit_reply(callback, [](IDatabase& db) -> Result<Reply> {
     auto rows = db.list_storages();
     if (!rows) {
       return rows.error();
@@ -90,7 +90,7 @@ void StorageController::get_one(const drogon::HttpRequestPtr&,
                                 cat("GET /api/storages/", storage_id))));
     return;
   }
-  submit_reply(callback, [storage_id](PgStore& db) -> Result<Reply> {
+  submit_reply(callback, [storage_id](IDatabase& db) -> Result<Reply> {
     auto node = db.get_storage(storage_id);
     if (!node) {
       return node.error();
@@ -207,7 +207,7 @@ void StorageController::upsert(const drogon::HttpRequestPtr& req,
   cfg_out["base_path"] = *base_path;
   in.config_json = compact(cfg_out).asString();
 
-  submit_reply(callback, [in, create](PgStore& db) -> Result<Reply> {
+  submit_reply(callback, [in, create](IDatabase& db) -> Result<Reply> {
     if (!create) {
       // 更新前先确认存在：不存在给 404，而不是按旧 upsert 语义悄悄新建
       auto existing = db.get_storage(in.storage_id);

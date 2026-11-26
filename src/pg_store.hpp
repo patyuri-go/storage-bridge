@@ -73,24 +73,56 @@ struct FileRecordOutcome {
   bool entity_created = false;
 };
 
-// 远端 PostgreSQL 写入端（SOCI postgresql 后端）。
+// 数据库操作的抽象接口：Web 层只依赖这个接口，测试可注入 gMock 实现。
 // 每个实例独占一条连接，只在持有它的那个线程里使用（由 DbPool 保证）。
-class PgStore {
+class IDatabase {
+public:
+  virtual ~IDatabase() = default;
+
+  virtual Status ping() = 0;
+
+  virtual Result<StorageNodeResult> upsert_storage(const StorageNodeInput& in) = 0;
+  virtual Result<StorageNodeRecord> get_storage(const std::string& storage_id) = 0;
+  virtual Result<std::vector<StorageNodeRecord>> list_storages() = 0;
+
+  virtual Result<FileRecordOutcome> record_file(const std::string& storage_id,
+                                                const std::string& key,
+                                                const std::string& sha256, long long size,
+                                                const std::string& mime_type) = 0;
+
+  virtual Result<bool> location_matches_size(const std::string& storage_id,
+                                             const std::string& suffix_key,
+                                             long long size) = 0;
+
+  virtual Result<std::vector<EntityLocation>>
+  list_entity_locations(const std::string& entity_id) = 0;
+
+  virtual Result<std::map<std::string, std::string>>
+  lookup_locations(const std::string& storage_id, const std::vector<std::string>& keys) = 0;
+
+  virtual Status mark_location_ok(const std::string& entity_id, const std::string& storage_id,
+                                  const std::string& key) = 0;
+  virtual Status mark_location_failed(const std::string& entity_id, const std::string& storage_id,
+                                      const std::string& key) = 0;
+};
+
+// 远端 PostgreSQL 写入端（SOCI postgresql 后端）。
+class PgStore : public IDatabase {
 public:
   // 建立一条新连接；失败返回 Postgres 错误
   static Result<std::unique_ptr<PgStore>> connect(const DbConfig& cfg);
 
   explicit PgStore(std::unique_ptr<soci::session> db);
-  ~PgStore();
+  ~PgStore() override;
 
   PgStore(const PgStore&) = delete;
   PgStore& operator=(const PgStore&) = delete;
 
-  Status ping();
+  Status ping() override;
 
-  Result<StorageNodeResult> upsert_storage(const StorageNodeInput& in);
-  Result<StorageNodeRecord> get_storage(const std::string& storage_id);
-  Result<std::vector<StorageNodeRecord>> list_storages();
+  Result<StorageNodeResult> upsert_storage(const StorageNodeInput& in) override;
+  Result<StorageNodeRecord> get_storage(const std::string& storage_id) override;
+  Result<std::vector<StorageNodeRecord>> list_storages() override;
 
   // 哈希模式写入口径（单文件、单事务）：
   //   1. entities 里按 sha256 找实体
@@ -99,29 +131,29 @@ public:
   // key 是相对 base_path 的路径（与 file.list 的 rel_path 同款）。
   Result<FileRecordOutcome> record_file(const std::string& storage_id, const std::string& key,
                                         const std::string& sha256, long long size,
-                                        const std::string& mime_type);
+                                        const std::string& mime_type) override;
 
   // 校验模式用：按 (storage_id, 「上级目录/文件名」) 找已有位置，判断是否存在大小一致的实体。
   // 命中即认为「已扫描」，不需要再读内容算哈希。
   // suffix_key 是完整 key 的最后两级（如 "s1/f1.txt"）：既匹配根下的 f1.txt，
   // 也匹配任意深度的 .../s1/f1.txt。纯读，不写任何表。
   Result<bool> location_matches_size(const std::string& storage_id, const std::string& suffix_key,
-                                     long long size);
+                                     long long size) override;
 
   // 下载用：列出该实体的全部位置（含所属存储节点信息），按 storage 名 + key 排序。
   // 实体不存在或没有任何 location 时返回空数组（由调用方给 404）。
-  Result<std::vector<EntityLocation>> list_entity_locations(const std::string& entity_id);
+  Result<std::vector<EntityLocation>> list_entity_locations(const std::string& entity_id) override;
 
   // 批量判定「这些 key 在该存储上是否已有实体」：返回 key -> entity_id。
   // 内部按 500 个一批发 IN 查询；不关心 location 的 state / failed_at。
   Result<std::map<std::string, std::string>> lookup_locations(
-      const std::string& storage_id, const std::vector<std::string>& keys);
+      const std::string& storage_id, const std::vector<std::string>& keys) override;
 
   // 下载探测的记账：只动 failed_at，不碰 state / verified_at
   Status mark_location_ok(const std::string& entity_id, const std::string& storage_id,
-                          const std::string& key);
+                          const std::string& key) override;
   Status mark_location_failed(const std::string& entity_id, const std::string& storage_id,
-                              const std::string& key);
+                              const std::string& key) override;
 
 private:
   PgStore() = default;

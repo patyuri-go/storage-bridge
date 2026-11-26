@@ -8,6 +8,10 @@ namespace sb {
 class DbPool;
 class JobWorker;
 
+namespace webdav {
+class IWebDavClient;
+}
+
 namespace web {
 
 // 进程级共享状态：控制器从 AppContext 取依赖，避免全局散落的指针。
@@ -18,6 +22,8 @@ struct AppContext {
   std::shared_ptr<DbPool> db;
   JobWorker* jobs = nullptr;
   std::string web_root;
+  // 生产默认为 CurlWebDavClient；测试注入 MockWebDav。
+  std::shared_ptr<webdav::IWebDavClient> webdav;
 
   static AppContext& instance();
 };

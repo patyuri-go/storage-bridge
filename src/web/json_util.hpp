@@ -35,10 +35,10 @@ Result<Json::Value> parse_json_body(const drogon::HttpRequestPtr& req);
 
 // 把阻塞工作（SOCI 查询、WebDAV 访问）丢到 DbPool 线程上跑，
 // 结果回到 IO 线程后再回复客户端。
-//   fn: Result<Reply>(PgStore&)
+//   fn: Result<Reply>(IDatabase&)
 template <class F> void submit_reply(const HttpCallback& callback, F&& fn) {
   AppContext& ctx = AppContext::instance();
-  ctx.db->submit([callback, fn = std::forward<F>(fn)](PgStore& db) mutable {
+  ctx.db->submit([callback, fn = std::forward<F>(fn)](IDatabase& db) mutable {
     drogon::HttpResponsePtr resp;
     try {
       auto out = fn(db);

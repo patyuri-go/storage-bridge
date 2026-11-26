@@ -11,7 +11,7 @@ namespace sb::web {
 
 void HealthController::check(const drogon::HttpRequestPtr&,
                              std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
-  submit_reply(callback, [](PgStore& db) -> Result<Reply> {
+  submit_reply(callback, [](IDatabase& db) -> Result<Reply> {
     Json::Value body(Json::objectValue);
     if (Status st = db.ping(); !st) {
       body["status"] = "degraded";

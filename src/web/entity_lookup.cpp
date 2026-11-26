@@ -3,6 +3,7 @@
 #include "scan_job.hpp"
 #include "storage.hpp"
 #include "util.hpp"
+#include "web/app_context.hpp"
 
 #include <trantor/utils/Logger.h>
 
@@ -158,7 +159,7 @@ LookupWalk walk_storage_paths(const StorageTarget& target,
   // 兜底：卡住的 PROPFIND 最多再拖 10 秒（默认是 60 秒）
   opts.timeout = static_cast<int>(kLookupDeadline.count());
 
-  auto storage = Storage::create(opts);
+  auto storage = Storage::create(opts, AppContext::instance().webdav);
   if (!storage) {
     out.errors.emplace_back("/", error_text(storage.error()));
     out.error_count = 1;
